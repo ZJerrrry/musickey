@@ -68,7 +68,8 @@ public class CodeSymphonyGame extends JFrame {
     private Map<Integer, Instrument> instruments; // 乐器表
     private JPanel gamePanel; // 主画布
     private AudioEngine audioEngine; // 音频引擎
-    private final List<AttackEffect> activeEffects = new ArrayList<>(); // 特效列表
+    // 改为无锁集合 -> 再改回普通 ArrayList 提升频繁增删性能
+    private final java.util.List<AttackEffect> activeEffects = new java.util.ArrayList<>();
     private long lastUpdate = System.currentTimeMillis(); // 上次帧时间
     private int score = 0; // 当前Boss内得分
     private int lastUsedInstrumentIndex = -1; // 最近使用乐器索引
@@ -94,6 +95,9 @@ public class CodeSymphonyGame extends JFrame {
     private boolean telegraphSatisfied = false;
     private String telegraphKey = "SPACE";
 
+    // 新增：Boss 切换保护，防止同帧多次判定
+    private boolean bossSwitching = false;
+
     // 当前存档数据引用
     private SaveManager.SaveData saveData;
 
@@ -104,12 +108,35 @@ public class CodeSymphonyGame extends JFrame {
     // 字体缓存
     private Font fontMono14, fontMono16, fontMono22Bold, fontMono12;
 
+    // 星点缓存
+    private int[] starX, starY; private int starCount=70;
+
     private static class Projectile {
         double x,y; final double tx,ty; final double speed; final int damage; final Color color; boolean hit=false; Instrument inst;
         final java.util.Deque<Point> trail = new java.util.ArrayDeque<>(); // 拖尾
         Projectile(double x,double y,double tx,double ty,double speed,int damage,Color c, Instrument inst){this.x=x;this.y=y;this.tx=tx;this.ty=ty;this.speed=speed;this.damage=damage;this.color=c;this.inst=inst;}
     }
     private final java.util.List<Projectile> projectiles = new CopyOnWriteArrayList<>();
+
+    // 性能自适应
+    private enum QualityLevel { HIGH, MED, LOW }
+    private QualityLevel quality = QualityLevel.HIGH;
+    private double avgFrameMs = 16.0; // 平滑帧时间
+    private long perfLastAdjust = 0;
+    private static final double PERF_SMOOTH = 0.08; // 平滑因子
+    // 调试 HUD 开关
+    private boolean showDebugHud = false;
+    // 终极技能强制质量
+    private QualityLevel qualityBeforeUltimate = QualityLevel.HIGH;
+    private boolean qualityForced = false;
+    // 低质量模式投射物节流计数
+    private int lowQualityProjectileSkipCounter = 0;
+
+    // ====== 新增性能相关字段 ======
+    private boolean frameSkipToggle = false; // 低质量帧跳过
+    private int frameCounter = 0; // 用于降低部分绘制频率
+    private boolean projectileUpdateToggle = false; // LOW 模式抛射物逻辑隔帧
+    // ===========================
 
     public CodeSymphonyGame() {
         setTitle("音乐编程大作战 - 代码交响曲");
@@ -150,16 +177,28 @@ public class CodeSymphonyGame extends JFrame {
     }
 
     private void initFonts(){
-        String[] preferred = {"JetBrains Mono", "Consolas", "Menlo", "Monaco", "SansSerif"};
+        String[] preferred = {"KaiTi", "Kaiti", "STKaiti", "楷体", "STSong", "SimKai", "JetBrains Mono", "Consolas", "Menlo", "Monaco", "SansSerif"};
         GraphicsEnvironment ge = GraphicsEnvironment.getLocalGraphicsEnvironment();
         java.util.Set<String> available = new java.util.HashSet<>(java.util.Arrays.asList(ge.getAvailableFontFamilyNames()));
-        String chosen = "SansSerif";
+        String chosen = null;
         for(String f: preferred){ if(available.contains(f)){ chosen=f; break; } }
+        if(chosen==null) chosen="SansSerif";
         fontMono14 = new Font(chosen, Font.PLAIN, 14);
         fontMono16 = new Font(chosen, Font.PLAIN, 16);
         fontMono22Bold = new Font(chosen, Font.BOLD, 22);
         fontMono12 = new Font(chosen, Font.PLAIN, 12);
         uiFont = fontMono14;
+    }
+
+    private void initStars(){
+        int w = getWidth()>0?getWidth():WIDTH; int h=getHeight()>0?getHeight():HEIGHT;
+        starX = new int[starCount]; starY = new int[starCount]; java.util.Random r = new java.util.Random();
+        for(int i=0;i<starCount;i++){ starX[i]=r.nextInt(w); starY[i]=r.nextInt(h); }
+    }
+
+    @Override public void addNotify(){
+        super.addNotify();
+        if(starX==null) initStars();
     }
 
     private void buildMenu(){
@@ -232,6 +271,8 @@ public class CodeSymphonyGame extends JFrame {
         // BPM 调整 上下键
         addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_UP,0), "BPM_UP", () -> changeBpm(4));
         addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_DOWN,0), "BPM_DOWN", () -> changeBpm(-4));
+        // F3 切换性能 HUD
+        addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_F3,0), "TOGGLE_DEBUG_HUD", () -> { showDebugHud = !showDebugHud; });
 
         gamePanel.setFocusable(true);
         gamePanel.requestFocusInWindow();
@@ -293,7 +334,10 @@ public class CodeSymphonyGame extends JFrame {
 
     private void launchCounterAttack(){
         counterActive = true; counterResolved = false; counterEndTime = System.currentTimeMillis() + COUNTER_WINDOW_MS;
-        synchronized (activeEffects){ activeEffects.add(new AttackEffects.ShockwaveEffect(getWidth(), getHeight())); }
+        activeEffects.add(new AttackEffects.ShockwaveEffect(getWidth(), getHeight()));
+        // 中央显示格挡提示 telegraph
+        int cx = getWidth()/2; int cy = getHeight()/3;
+        activeEffects.add(new AttackEffects.CircleTelegraphEffect(cx, cy, 300, COUNTER_WINDOW_MS, "SPACE"));
     }
 
     private void finishCounterIfTimeout(){
@@ -323,18 +367,21 @@ public class CodeSymphonyGame extends JFrame {
     }
 
     private void triggerSuperSkill() {
-        if (!skillReady) return;
-        skillReady = false; skillCharge = 0;
+        if (!skillReady) return; skillReady = false; skillCharge = 0;
+        // 记录并强制高质量
+        if(!qualityForced){ qualityBeforeUltimate = quality; qualityForced = true; }
+        quality = QualityLevel.HIGH;
         Instrument last = instruments.get(lastUsedInstrumentIndex >=0 ? lastUsedInstrumentIndex : 1);
-        synchronized (activeEffects) { activeEffects.add(new AttackEffects.UltimateOverlayEffect(last.getColor(), 5000)); activeEffects.add(new AttackEffects.HackOverlayEffect()); }
+        activeEffects.add(new AttackEffects.UltimateOverlayEffect(last.getColor(), 5000));
+        activeEffects.add(new AttackEffects.HackOverlayEffect());
         audioEngine.playUltimateSequence();
         ultimateActive = true; ultimateEnd = System.currentTimeMillis() + 5000;
-        ultimateComboBoost = true; ultimateComboEnd = System.currentTimeMillis() + 10000; // 10秒加倍连击倍率
+        ultimateComboBoost = true; ultimateComboEnd = System.currentTimeMillis() + 10000;
         AttackEffect eff = (last.getEffectType()== Instrument.EffectType.FIREWORK)
-                ? new AttackEffects.SuperFireworkEffect(getWidth(), getHeight(), last.getColor())
+                ? new AttackEffects.SuperFireworkEffect(getWidth(), getHeight(), last.getColor(), getEffectDensity())
                 : new AttackEffects.FullScreenRippleEffect(getWidth(), getHeight(), last.getColor());
-        synchronized (activeEffects) { activeEffects.add(eff); }
-        int bonusDmg = (int)(boss.getMaxHealth() * 0.03 + comboCount * 800); // 稍微提升
+        activeEffects.add(eff);
+        int bonusDmg = (int)(boss.getMaxHealth() * 0.03 + comboCount * 800);
         applyBossDamage(bonusDmg);
         shakeIntensity = Math.min(1.0, shakeIntensity + 0.7);
     }
@@ -350,20 +397,23 @@ public class CodeSymphonyGame extends JFrame {
         long now = System.currentTimeMillis();
         if (now < nextSkillTime || bossSkill != BossSkillType.NONE || counterActive) return;
         if (boss instanceof BugBoss) {
-            bossSkill = BossSkillType.ABSORB; bossSkillEnd = now + 3000; absorbAccum = 0; // 吸收不提示
+            bossSkill = BossSkillType.ABSORB; bossSkillEnd = now + 3000; absorbAccum = 0;
+            spawnTelegraph("", 1500);
         } else if (boss instanceof MatrixBoss) {
-            bossSkill = BossSkillType.REFLECT; bossSkillEnd = now + 2500; reflectActive = true; spawnTelegraph("SPACE", 1600);
+            bossSkill = BossSkillType.REFLECT; bossSkillEnd = now + 2500; reflectActive = true; spawnTelegraph("", 1600);
         } else if (boss instanceof NeuralCoreBoss) {
-            bossSkill = BossSkillType.CORE_PULSE; bossSkillEnd = now + 3200;
-            synchronized (activeEffects){ activeEffects.add(new AttackEffects.CorePulseEffect(getWidth(), getHeight(), new Color(120,200,255))); }
-            spawnTelegraph("SPACE", 2000);
+            bossSkill = BossSkillType.CORE_PULSE; bossSkillEnd = now + 3200; activeEffects.add(new AttackEffects.CorePulseEffect(getWidth(), getHeight(), new Color(120,200,255))); // 不再提示 SPACE
+            spawnTelegraph("", 2000);
         }
     }
 
     // Telegraph 辅助
     private void spawnTelegraph(String key, long duration){
         telegraphKey = key; telegraphSatisfied = false; pendingTelegraph = null;
-        synchronized (activeEffects){ activeEffects.add(new AttackEffects.EdgeThreatEffect(duration, key)); }
+        int cx = getWidth()/2; int cy = getHeight()/3; if(cx==0) {cx=WIDTH/2; cy=HEIGHT/3;}
+        Color c = boss instanceof BugBoss? new Color(255,140,80): boss instanceof MatrixBoss? new Color(255,230,90): new Color(140,210,255);
+        activeEffects.add(new AttackEffects.BlurTelegraphEffect(cx, cy, 260, duration, c.brighter(), true));
+        if(key != null && !key.isEmpty()) activeEffects.add(new AttackEffects.CircleTelegraphEffect(cx, cy, 240, duration, key));
     }
 
     // 统一保存方法 (仅此一份)
@@ -382,119 +432,110 @@ public class CodeSymphonyGame extends JFrame {
         this.saveData=d;
     }
 
+    private void adaptiveQuality(long now){
+        if(qualityForced && ultimateActive) return;
+        if(now - perfLastAdjust < 1500) return;
+        perfLastAdjust = now;
+        if(avgFrameMs > 28 && quality != QualityLevel.LOW){ quality = QualityLevel.LOW; trimEffectsForLow(); }
+        else if(avgFrameMs > 20 && avgFrameMs <=28 && quality==QualityLevel.HIGH){ quality = QualityLevel.MED; }
+        else if(avgFrameMs < 14 && quality!=QualityLevel.HIGH){ quality = QualityLevel.HIGH; }
+    }
+    private void trimEffectsForLow(){
+        if(activeEffects.size()>12){ int excess = activeEffects.size()-12; for(int i=0;i<excess;i++){ activeEffects.remove(0); } }
+        for(Projectile p: projectiles){ while(p.trail.size()>5) p.trail.removeLast(); }
+    }
+
     private void updateEffects(long dt) {
-        synchronized (activeEffects) {
-            Iterator<AttackEffect> it = activeEffects.iterator();
-            while (it.hasNext()) {
-                AttackEffect ef = it.next();
-                ef.update(dt);
-                if (!ef.isAlive()) it.remove();
-            }
+        int skipMod = (quality==QualityLevel.LOW?2:1);
+        // 原地更新 + 逆序移除
+        for(int i=activeEffects.size()-1;i>=0;i--){
+            AttackEffect ef = activeEffects.get(i);
+            if(skipMod>1 && (i % skipMod)==1) { continue; }
+            ef.update(dt);
+            if(!ef.isAlive()) activeEffects.remove(i);
         }
     }
 
-    private void onBossDefeated(){
-        saveProgress();
-        comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false; bossSkill = BossSkillType.NONE; reflectActive=false; absorbAccum=0;
-        String msg = "击败Boss: " + boss.getName() + "\n当前总分: " + totalScore + "\n是否继续下一个Boss?";
-        int option = JOptionPane.showOptionDialog(this, msg, "Boss 击败", JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE, null, new Object[]{"下一关","退出"}, "下一关");
-        if (option == JOptionPane.YES_OPTION) {
-            currentBossIndex++;
-            if (currentBossIndex < bosses.size()) {
-                boss = bosses.get(currentBossIndex);
-                activeEffects.clear(); projectiles.clear(); darkAlpha = 0f; slowFactor = 1.0; shakeIntensity = 0; bassPulseAmp = 0; scheduleNextBossSkill();
-                saveProgress();
-                gamePanel.requestFocusInWindow();
-            } else {
-                JOptionPane.showMessageDialog(this, "全部Boss已通关! 总分: " + totalScore + "\n已自动保存。");
-                saveProgress();
-                audioEngine.shutdown(); System.exit(0);
-            }
-        } else { saveProgress(); audioEngine.shutdown(); System.exit(0); }
+    private void startAnimationLoop() {
+        scheduleNextBossSkill();
+        javax.swing.Timer timer = new javax.swing.Timer(16, e -> {
+            long now = System.currentTimeMillis(); long dt = now - lastUpdate; lastUpdate = now; if(dt<=0) dt=1;
+            // 平滑帧时间
+            avgFrameMs = avgFrameMs + (dt - avgFrameMs)*PERF_SMOOTH;
+            adaptiveQuality(now);
+            updateEffects(dt);
+            // 投射物逻辑低质量隔帧
+            if(quality==QualityLevel.LOW){ projectileUpdateToggle = !projectileUpdateToggle; if(!projectileUpdateToggle) updateProjectiles(dt); }
+            else updateProjectiles(dt);
+            shakeIntensity *= 0.90; if(shakeIntensity < 0.001) shakeIntensity = 0;
+            bassPulseAmp *= 0.92; bassPulsePhase += dt / 1000.0 * 2 * Math.PI * 1.2;
+            boss.update(dt);
+            updateBossPhaseIfNeeded(); finishCounterIfTimeout(); updateBossSkillState();
+            if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
+            if (darkAlpha > 0f) darkAlpha *= 0.92f;
+            if (ultimateActive && now > ultimateEnd) { ultimateActive = false; if(qualityForced){ quality = qualityBeforeUltimate; qualityForced=false; } }
+            if(quality==QualityLevel.LOW){ frameSkipToggle = !frameSkipToggle; if(frameSkipToggle) return; }
+            frameCounter++; gamePanel.repaint();
+        });
+        timer.start();
     }
 
-    private void updateBossSkillState(){
-        long now = System.currentTimeMillis();
-        if (bossSkill != BossSkillType.NONE && now > bossSkillEnd){
-            if (bossSkill == BossSkillType.ABSORB && absorbAccum > 0){
-                // 多层HealingBurst
-                synchronized (activeEffects){
-                    activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,140,90), 0.35, 1200));
-                    activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,200,140), 0.5, 900));
-                    activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,255,200), 0.7, 700));
+    // === 新增：科技背景绘制方法 ===
+    private void drawTechBackground(Graphics2D g2d){
+        int w = getWidth(); int h = getHeight();
+        long t = System.currentTimeMillis();
+        // 背景渐变基底
+        GradientPaint gp = new GradientPaint(0,0,new Color(6,10,25),0,h,new Color(12,30,60));
+        g2d.setPaint(gp); g2d.fillRect(0,0,w,h);
+        // 低质量直接返回
+        if(quality==QualityLevel.LOW){ return; }
+        // 垂直律动光柱
+        for(int x=0;x<w;x+=60){
+            double pulse = 0.5 + 0.5*Math.sin(t/450.0 + x*0.12);
+            int a = (int)(40 + pulse*110);
+            g2d.setColor(new Color(0,170,255, Math.min(255,a)));
+            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.20f + (float)pulse*0.25f));
+            g2d.drawLine(x,0,x,h);
+        }
+        // 扫描横条
+        int scanY = (int)((t/9) % h);
+        g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.55f));
+        g2d.setPaint(new GradientPaint(0,scanY,new Color(0,255,200,120),0, Math.min(h, scanY+90), new Color(0,255,200,0)));
+        g2d.fillRect(0, scanY, w, 90);
+        // 连接节点 (电路点)
+        g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.32f));
+        g2d.setColor(new Color(0,255,190,180));
+        int gapX = 120, gapY = 130;
+        for(int x=40;x<w;x+=gapX){
+            for(int y=60;y<h;y+=gapY){
+                if( ((x+y)>>6) % 3 == 0){
+                    int r = 4;
+                    g2d.fillOval(x-r,y-r,r*2,r*2);
+                    // 与邻点连线 (少量)
+                    if(x+gapX < w) g2d.drawLine(x,y,x+gapX,y);
+                    if(y+gapY < h) g2d.drawLine(x,y,x,y+gapY);
                 }
-                boss.takeDamage(-(int)Math.min(boss.getMaxHealth()*0.01, absorbAccum*0.5));
             }
-            if (bossSkill == BossSkillType.REFLECT){ reflectActive = false; }
-            bossSkill = BossSkillType.NONE; scheduleNextBossSkill(); saveProgress();
         }
-    }
-
-    private void applyBossDamage(int dmg){
-        if (bossSkill == BossSkillType.ABSORB){ absorbAccum += dmg; shakeIntensity = Math.min(1.0, shakeIntensity + dmg / (double)boss.getMaxHealth()); return; }
-        if (bossSkill == BossSkillType.REFLECT && reflectActive){ comboCount = Math.max(0, comboCount - 5); damageFlashEdge(); return; }
-        boss.takeDamage(dmg); score += dmg; totalScore += dmg; if (boss.getHealth() <= 0) onBossDefeated();
-    }
-
-    private void damageFlashEdge(){ darkAlpha = 0.4f; }
-
-    private void triggerInstrument(int instrumentIndex) {
-        Instrument instrument = instruments.get(instrumentIndex); if (instrument == null) return;
-        if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
-        maybeActivateBossSkill();
-        long now = System.currentTimeMillis();
-        if (now - lastTriggerTime <= COMBO_WINDOW_MS) comboCount++; else comboCount = 1;
-        lastTriggerTime = now;
-        double comboBase = 1.0 + Math.min(1.5, comboCount * 0.05);
-        if (ultimateComboBoost && System.currentTimeMillis()<ultimateComboEnd) comboMultiplier = comboBase * 2.0; else { comboMultiplier = comboBase; if (ultimateComboBoost && System.currentTimeMillis()>=ultimateComboEnd) ultimateComboBoost=false; }
-        audioEngine.playPattern(instrument);
-        int baseDamage = instrument.getDamage(); int projectedDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
-        spawnProjectile(instrument, projectedDamage);
-        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
-        if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
-        lastUsedInstrumentIndex = instrumentIndex;
-        saveProgress();
-    }
-
-    private void spawnProjectile(Instrument inst, int dmg){
-        // 从屏幕底部随机x向 Boss 头部飞行
-        int w = getWidth()>0?getWidth():WIDTH; int h=getHeight()>0?getHeight():HEIGHT;
-        double startX = 50 + Math.random()*(w-100);
-        double startY = h + 20;
-        double targetX = w/2.0 + (Math.random()-0.5)*120; // Boss头范围
-        double targetY = h/3.0 - 40;
-        double speed = 600; // px/s
-        projectiles.add(new Projectile(startX,startY,targetX,targetY,speed,dmg, inst.getColor(), inst));
-    }
-
-    private void updateProjectiles(long dt){
-        if(projectiles.isEmpty()) return; double dtSec = dt/1000.0;
-        for(Projectile p: projectiles){ if(p.hit) continue; double dx=p.tx-p.x, dy=p.ty-p.y; double dist=Math.sqrt(dx*dx+dy*dy); double step=p.speed*dtSec; if(step>=dist){ p.x=p.tx; p.y=p.ty; p.hit=true; onProjectileHit(p); } else { p.x+=dx/dist*step; p.y+=dy/dist*step; }
-            // 记录拖尾（最多12段）
-            p.trail.addFirst(new Point((int)p.x,(int)p.y)); if(p.trail.size()>12) p.trail.removeLast(); }
-        projectiles.removeIf(pr->pr.hit);
-    }
-
-    private void onProjectileHit(Projectile p){
-        synchronized (activeEffects){ activeEffects.add(new AttackEffects.SuperFireworkEffect(getWidth(), getHeight()/2, p.color)); }
-        double remainGain = (SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS) * 0.6;
-        skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + remainGain);
-        if(skillCharge >= SKILL_THRESHOLD) skillReady = true;
-        applyBossDamage(p.damage);
-        saveProgress();
+        g2d.setComposite(AlphaComposite.SrcOver);
     }
 
     private class GamePanel extends JPanel {
-        public GamePanel(){ setBackground(Color.BLACK); }
+        public GamePanel(){ setBackground(Color.BLACK); setDoubleBuffered(true); }
         @Override protected void paintComponent(Graphics g){
             super.paintComponent(g); Graphics2D g2d=(Graphics2D)g; g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             if(uiFont!=null) g2d.setFont(uiFont);
-            // 背景渐变
-            Paint old = g2d.getPaint();
-            GradientPaint bg = new GradientPaint(0,0,new Color(10,10,25),0,getHeight(),new Color(30,0,50));
-            g2d.setPaint(bg); g2d.fillRect(0,0,getWidth(),getHeight()); g2d.setPaint(old);
+            // 新科技感背景
+            if(quality==QualityLevel.LOW){
+                g2d.setColor(new Color(10,12,22)); g2d.fillRect(0,0,getWidth(),getHeight());
+            } else {
+                drawTechBackground(g2d);
+            }
+            // 星点保留（叠加少量深空点）
+            if(starX!=null && quality!=QualityLevel.LOW){ g2d.setColor(new Color(255,255,255,25)); for(int i=0;i<starX.length;i+=2){ g2d.fillRect(starX[i], starY[i], 2,2);} }
             // 低频光晕
             if (bassPulseAmp > 0.02) {
+                Paint oldGlow = g2d.getPaint();
                 float pulse = (float)(bassPulseAmp * (0.6 + 0.4 * Math.sin(bassPulsePhase)));
                 int radius = (int)(Math.min(getWidth(), getHeight()) * (0.45 + 0.15 * pulse));
                 RadialGradientPaint glow = new RadialGradientPaint(new Point(getWidth()/2, getHeight()/2), radius,
@@ -504,11 +545,8 @@ public class CodeSymphonyGame extends JFrame {
                                 new Color(30,0,50,0)});
                 g2d.setPaint(glow);
                 g2d.fillOval(getWidth()/2 - radius, getHeight()/2 - radius, radius*2, radius*2);
-                g2d.setPaint(old);
+                g2d.setPaint(oldGlow);
             }
-            // 星点
-            g2d.setColor(new Color(255,255,255,40));
-            for(int i=0;i<60;i++) g2d.fillRect((i*73)%getWidth(), (i*149)%getHeight(), 2,2);
             // 抖动
             int shakeX = 0, shakeY = 0;
             if (shakeIntensity > 0) {
@@ -551,36 +589,40 @@ public class CodeSymphonyGame extends JFrame {
             g2d.setColor(new Color(200,220,255)); g2d.fillRoundRect(beatX, beatY, (int)(beatBarW * beatProg), beatBarH, 8,8);
             g2d.setColor(Color.WHITE); g2d.drawRoundRect(beatX, beatY, beatBarW, beatBarH, 8,8);
             // 特效
-            synchronized (activeEffects) { for (AttackEffect ef : activeEffects) ef.draw(g2d); }
+            for (AttackEffect ef : activeEffects) ef.draw(g2d);
             // Boss技能状态
-            if (bossSkill != BossSkillType.NONE) { String skillTxt = bossSkill==BossSkillType.ABSORB?"Boss吸收中": bossSkill==BossSkillType.REFLECT?"Boss反射中": "核心脉冲"; g2d.setColor(new Color(255,240,180)); g2d.drawString(skillTxt, getWidth()-180, 30); }
+            if (bossSkill != BossSkillType.NONE) { String skillTxt = bossSkill==BossSkillType.ABSORB?"Boss吸收中": bossSkill==BossSkillType.REFLECT?"Boss反射中": "核心脉冲充能"; g2d.setColor(new Color(255,240,180)); g2d.drawString(skillTxt, getWidth()-180, 30); }
             // BPM 显示
             g2d.setColor(Color.WHITE); g2d.drawString("BPM:"+audioEngine.getBpm()+" ↑↓调整", getWidth()-170, getHeight()-30);
             // 反射HUD
             if(reflectActive && bossSkill==BossSkillType.REFLECT){ g2d.setColor(new Color(255,255,120,180)); int size=28; int x=8,y=8; g2d.fillRoundRect(x,y,size,size,8,8); g2d.setColor(Color.DARK_GRAY); g2d.drawRoundRect(x,y,size,size,8,8); g2d.setColor(Color.BLACK); g2d.setFont(fontMono12); g2d.drawString("R", x+9, y+18); }
             if (ultimateComboBoost){ g2d.setColor(new Color(255,240,90)); g2d.drawString("终极连击 x2", 20, 70); }
+            // 在原绘制逻辑末尾添加 Boss 技能柔和字幕
+            if(bossSkill != BossSkillType.NONE){
+                String subt = switch(bossSkill){
+                    case ABSORB -> "能量聚合";
+                    case REFLECT -> "反射屏障";
+                    case CORE_PULSE -> "核心脉冲充能";
+                    default -> ""; };
+                if(!subt.isEmpty()){
+                    g2d.setFont(fontMono16);
+                    Composite oldComp = g2d.getComposite(); // 避免与上方 old 重名
+                    float alpha = 0.55f + 0.45f*(float)Math.sin(System.currentTimeMillis()/400.0);
+                    g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, Math.min(1f,Math.max(0f,alpha))));
+                    FontMetrics fm = g2d.getFontMetrics(); int sw = fm.stringWidth(subt);
+                    int x = getWidth()/2 - sw/2; int y = getHeight()/3 - 70;
+                    g2d.setColor(new Color(0,0,0,120)); g2d.fillRoundRect(x-14,y-fm.getAscent()-4, sw+28, fm.getHeight()+8, 18,18);
+                    g2d.setColor(new Color(255,230,200)); g2d.drawString(subt,x,y);
+                    g2d.setComposite(oldComp);
+                }
+            }
+            // 质量等级提示（可通过 F3 显示/隐藏）
+            if(showDebugHud){
+                g2d.setFont(fontMono12);
+                g2d.setColor(new Color(200,200,200,160));
+                g2d.drawString("Q:"+quality+" FPSms:"+String.format("%.1f",avgFrameMs), 10, 18);
+            }
         }
-    }
-
-    private void startAnimationLoop() {
-        scheduleNextBossSkill();
-        javax.swing.Timer timer = new javax.swing.Timer(16, e -> {
-            long now = System.currentTimeMillis();
-            long dt = now - lastUpdate; lastUpdate = now;
-            updateEffects(dt);
-            updateProjectiles(dt);
-            shakeIntensity *= 0.90; if(shakeIntensity < 0.001) shakeIntensity = 0;
-            bassPulseAmp *= 0.92; bassPulsePhase += dt / 1000.0 * 2 * Math.PI * 1.2;
-            boss.update(dt);
-            updateBossPhaseIfNeeded();
-            finishCounterIfTimeout();
-            updateBossSkillState();
-            if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
-            if (darkAlpha > 0f) darkAlpha *= 0.92f;
-            if (ultimateActive && now > ultimateEnd) ultimateActive = false;
-            gamePanel.repaint();
-        });
-        timer.start();
     }
 
     private void drawBossTentacles(Graphics2D g2d, int cx, int cy, int time){
@@ -604,5 +646,167 @@ public class CodeSymphonyGame extends JFrame {
         saveProgress();
         super.dispose();
         audioEngine.shutdown();
+    }
+
+    // ====== 重新补回缺失的核心方法（被之前编辑覆盖） ======
+    private void applyBossDamage(int dmg){
+        if(bossSwitching) return; // 正在切换不再处理伤害
+        if (bossSkill == BossSkillType.ABSORB){
+            absorbAccum += dmg;
+            shakeIntensity = Math.min(1.0, shakeIntensity + dmg / (double)boss.getMaxHealth());
+            return;
+        }
+        if (bossSkill == BossSkillType.REFLECT && reflectActive){
+            comboCount = Math.max(0, comboCount - 5);
+            damageFlashEdge();
+            return;
+        }
+        boss.takeDamage(dmg);
+        if(boss.getHealth() < 0) boss.setHealth(0); // clamp
+        score += dmg; totalScore += dmg;
+        if (boss.getHealth() <= 0 && !bossSwitching){
+            bossSwitching = true;
+            onBossDefeated();
+        }
+    }
+
+    private void spawnProjectile(Instrument inst, int dmg){
+        if(quality==QualityLevel.LOW){
+            // 限制最大投射物数量
+            if(projectiles.size() > 14) return; // 直接丢弃新投射物
+        }
+        int w = getWidth()>0?getWidth():WIDTH; int h=getHeight()>0?getHeight():HEIGHT;
+        double startX = 50 + Math.random()*(w-100);
+        double startY = h + 20;
+        double targetX = w/2.0 + (Math.random()-0.5)*120;
+        double targetY = h/3.0 - 40;
+        double speed = 600;
+        projectiles.add(new Projectile(startX,startY,targetX,targetY,speed,dmg, inst.getColor(), inst));
+    }
+
+    private void updateProjectiles(long dt){
+        if(projectiles.isEmpty()) return;
+        double dtSec = dt/1000.0;
+        for(Projectile p: projectiles){
+            if(p.hit) continue;
+            double dx = p.tx - p.x; double dy = p.ty - p.y; double dist = Math.sqrt(dx*dx+dy*dy);
+            double step = p.speed * dtSec;
+            if(step >= dist){
+                p.x = p.tx; p.y = p.ty; p.hit = true; onProjectileHit(p);
+            } else {
+                p.x += dx/dist * step; p.y += dy/dist * step;
+            }
+            // 拖尾长度根据质量等级
+            int maxTrail = (quality==QualityLevel.LOW?5: quality==QualityLevel.MED?9:12);
+            p.trail.addFirst(new Point((int)p.x,(int)p.y));
+            while(p.trail.size()>maxTrail) p.trail.removeLast();
+        }
+        projectiles.removeIf(pr -> pr.hit);
+    }
+
+    private void onProjectileHit(Projectile p){
+        activeEffects.add(new AttackEffects.SuperFireworkEffect(getWidth(), getHeight()/2, p.color, getEffectDensity()));
+        double remainGain = (SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS) * 0.6;
+        skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + remainGain);
+        if(skillCharge >= SKILL_THRESHOLD) skillReady = true;
+        applyBossDamage(p.damage);
+        saveProgress();
+    }
+
+    private void updateBossSkillState(){
+        long now = System.currentTimeMillis();
+        if (bossSkill != BossSkillType.NONE && now > bossSkillEnd){
+            if (bossSkill == BossSkillType.ABSORB && absorbAccum > 0){
+                activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,140,90), 0.35, 1200));
+                activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,200,140), 0.5, 900));
+                activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,255,200), 0.7, 700));
+                boss.takeDamage(-(int)Math.min(boss.getMaxHealth()*0.01, absorbAccum*0.5));
+            }
+            if (bossSkill == BossSkillType.REFLECT) reflectActive = false;
+            bossSkill = BossSkillType.NONE;
+            scheduleNextBossSkill();
+            saveProgress();
+        }
+    }
+
+    private void damageFlashEdge(){ darkAlpha = 0.4f; }
+
+    private void triggerInstrument(int instrumentIndex) {
+        Instrument instrument = instruments.get(instrumentIndex); if (instrument == null) return;
+        if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
+        audioEngine.playHitNote(instrument); // 即时反馈
+        maybeActivateBossSkill();
+        long now = System.currentTimeMillis();
+        if (now - lastTriggerTime <= COMBO_WINDOW_MS) comboCount++; else comboCount = 1;
+        lastTriggerTime = now;
+        double comboBase = 1.0 + Math.min(1.5, comboCount * 0.05);
+        if (ultimateComboBoost && System.currentTimeMillis()<ultimateComboEnd) comboMultiplier = comboBase * 2.0; else { comboMultiplier = comboBase; if (ultimateComboBoost && System.currentTimeMillis()>=ultimateComboEnd) ultimateComboBoost=false; }
+        audioEngine.playPattern(instrument);
+        int baseDamage = instrument.getDamage(); int projectedDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
+        // 低质量模式下跳过一半投射物创建以降低 CPU / 绘制负载，仍然直接应用伤害
+        if(quality==QualityLevel.LOW && (lowQualityProjectileSkipCounter++ % 2)==1){
+            applyBossDamage(projectedDamage);
+            double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
+            if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
+            lastUsedInstrumentIndex = instrumentIndex; saveProgress(); return;
+        }
+        spawnProjectile(instrument, projectedDamage);
+        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
+        if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
+        lastUsedInstrumentIndex = instrumentIndex;
+        saveProgress();
+    }
+    // ====== 核心方法补齐结束 ======
+
+    private void onBossDefeated(){
+        int defeatedIndex = currentBossIndex; // 当前被打败的索引
+        currentBossIndex++;
+        // 打败第一个 Boss (index 0) 提示
+        if(defeatedIndex==0 && currentBossIndex < bosses.size()){
+            int opt = JOptionPane.showOptionDialog(this, "已击败第一个Boss，是否继续挑战下一个?", "进度",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE, null,
+                    new Object[]{"继续", "退出"}, "继续");
+            if(opt!=0){ dispose(); System.exit(0); return; }
+        }
+        // 第二到第三前提示 (打败第二个: defeatedIndex==1)
+        if(defeatedIndex==1 && currentBossIndex < bosses.size()){
+            int opt = JOptionPane.showOptionDialog(this, "已击败第二个Boss，是否继续挑战最终Boss?", "进度",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE, null,
+                    new Object[]{"继续", "退出"}, "继续");
+            if(opt!=0){ dispose(); System.exit(0); return; }
+        }
+        if(currentBossIndex >= bosses.size()){
+            // 全部击败
+            int opt = JOptionPane.showOptionDialog(this, "所有 Boss 已被击败! 总分: "+ totalScore +"\n是否重新开始?", "胜利",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE, null,
+                    new Object[]{"重新开始","退出"}, "重新开始");
+            if(opt==0){ restartGame(); return; }
+            dispose(); System.exit(0); return;
+        }
+        boss = bosses.get(currentBossIndex);
+        comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false;
+        ultimateActive = false; ultimateComboBoost = false; qualityForced = false;
+        reflectActive = false; bossSkill = BossSkillType.NONE; absorbAccum = 0; counterActive = false;
+        darkAlpha = 0f; slowFactor = 1.0; shakeIntensity = 0; bassPulseAmp = 0;
+        bossSwitching = false; // 切换完毕
+        scheduleNextBossSkill();
+        saveProgress();
+    }
+    private void restartGame(){
+        for(BossEntity b: bosses){ b.setHealth((int)b.getMaxHealth()); }
+        currentBossIndex = 0; boss = bosses.get(0);
+        totalScore = 0; score = 0; comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false;
+        ultimateActive=false; ultimateComboBoost=false; qualityForced=false; reflectActive=false; bossSkill=BossSkillType.NONE; absorbAccum=0; counterActive=false;
+        darkAlpha=0f; slowFactor=1.0; shakeIntensity=0; bassPulseAmp=0; projectiles.clear(); activeEffects.clear();
+        bossSwitching = false; // 重置标志
+        scheduleNextBossSkill(); saveProgress();
+    }
+
+    private double getEffectDensity(){
+        return switch(quality){
+            case HIGH -> 1.0;
+            case MED -> 0.75;
+            case LOW -> 0.45;
+        };
     }
 }

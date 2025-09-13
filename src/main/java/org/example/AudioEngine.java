@@ -27,6 +27,8 @@ public class AudioEngine {
     private final int[][] COUNTER_LINE = { {84,83,81,79}, {83,81,79,76}, {86,84,83,81}, {83,81,79,76} };
 
     private volatile double volumeScale = 1.0; // 0.0 - 1.0
+    private double playerBoost = 1.35; // 玩家触发音量提升系数
+    private double ultimateBoost = 1.6; // 终极技能额外提升
 
     // 新增：多段主旋律控制 (Sicko风格 A/B/C)
     private static final int SECTION_LENGTH_BARS = 4; // 每段4小节
@@ -34,6 +36,8 @@ public class AudioEngine {
     private volatile long barCounter = 0;
     private int barsPerChord = 1; // 和弦持续
     private int[] dropBassPattern = {36,36,36,38, 36,36,41,43};
+
+    private Thread bgThread; // optimized background melody loop thread
 
     public AudioEngine() {
         try {
@@ -89,8 +93,16 @@ public class AudioEngine {
         if (bgRunning || channels == null) return;
         bgRunning = true;
         try{ channels[BG_CHANNEL].programChange(0); }catch(Exception ignored){}
-        bgMelodyExec.scheduleWithFixedDelay(this::loopMainMelody, 0, 1, TimeUnit.MILLISECONDS);
+        bgThread = new Thread(() -> {
+            while(bgRunning){
+                loopMainMelody();
+            }
+        }, "BG-Melody-Loop");
+        bgThread.setDaemon(true);
+        bgThread.start();
     }
+    public void stopBackgroundMelody(){ bgRunning=false; }
+
     private void loopMainMelody(){
         if(!bgRunning || channels==null) return;
         try {
@@ -114,19 +126,17 @@ public class AudioEngine {
         MidiChannel perc = channels[9];
         try { pad.programChange(91);}catch(Exception ignored){}
         int bar = (int)((beat/4)%SECTION_LENGTH_BARS);
-        if(beat % 4 == 0){ // bar start chord
+        if(beat % 4 == 0){
             int root = switch(bar){
-                case 0 -> 48; // C
-                case 1 -> 50; // D
-                case 2 -> 53; // F
-                default -> 55; // G
+                case 0 -> 48;
+                case 1 -> 50;
+                case 2 -> 53;
+                default -> 55;
             };
             int[] chord = {root, root+4, root+7, root+11};
             for(int n: chord) pad.noteOn(n,vs(60));
         }
-        // simple kick on beats 0 and 2 of each bar
         if((beat %4)==0 || (beat %4)==2){ perc.noteOn(35,vs(110)); }
-        // last beat arp fill
         if((beat %4)==3){ int[] fill={72,76,79}; MidiChannel arp=channels[(BG_CHANNEL+1)%channels.length]; for(int n:fill){ arp.noteOn(n,vs(80)); Thread.sleep(beatLengthMs/6); arp.noteOff(n);} }
     }
 
@@ -145,9 +155,7 @@ public class AudioEngine {
             arp.noteOff(note);
             Thread.sleep(step/2);
         }
-        // Snare on off-beat (beat 1 & 3)
         if((beat %4)==1 || (beat %4)==3){ drum.noteOn(38,vs(100)); }
-        // Hi-hat each 8th
         drum.noteOn(42,vs(50));
     }
 
@@ -163,10 +171,31 @@ public class AudioEngine {
         bass.noteOff(note);
         // trap style hats 3 subdivisions
         for(int i=0;i<3;i++){ drum.noteOn(42,vs(55)); Thread.sleep(beatLengthMs/6); }
-        // Clap every 2 beats
         if((beat %2)==1){ drum.noteOn(39,vs(100)); }
     }
-    public void stopBackgroundMelody(){ bgRunning=false; }
+
+    /** Play an immediate short hit for player feedback (no beat wait). */
+    public void playHitNote(Instrument inst){
+        if(channels==null) return;
+        int ch = inst.getChannel();
+        if(ch<0 || ch>=channels.length) return;
+        try { if(ch!=9) channels[ch].programChange(inst.getProgram()); } catch(Exception ignored){}
+        int base = switch(inst.getSoundType()){
+            case "鼓" -> -1; // percussion
+            case "钢琴" -> 60;
+            case "小提琴" -> 67;
+            case "萨克斯" -> 62;
+            case "贝斯" -> 40;
+            default -> 60;
+        };
+        if(ch==9){ // percussion immediate hit
+            int[] drums={35,38,42,46,49}; int note=drums[(int)(System.nanoTime()%drums.length)]; channels[9].noteOn(note, boostVel(115)); patternPool.submit(() -> { try { Thread.sleep(150); channels[9].noteOff(note);} catch(InterruptedException ignored){} }); return; }
+        int note = base + (int)(System.nanoTime()%5); // simple small range
+        channels[ch].noteOn(note, boostVel(105));
+        // 叠加一个高八度弱音增强存在感（非鼓）
+        int high = note+12; if(high<120) channels[ch].noteOn(high, boostVel(70));
+        patternPool.submit(() -> { try { Thread.sleep(180); channels[ch].noteOff(note); if(high<120) channels[ch].noteOff(high);} catch(InterruptedException ignored){} });
+    }
 
     public void playPattern(Instrument instrument) {
         if (channels == null) return;
@@ -185,18 +214,57 @@ public class AudioEngine {
 
     private void playTwoBeatDrum() throws InterruptedException {
         MidiChannel drum = channels[9]; long step = beatLengthMs;
-        drum.noteOn(35,vs(120)); drum.noteOn(42,vs(70)); Thread.sleep(step/2); drum.noteOff(35); drum.noteOff(42);
-        drum.noteOn(42,vs(70)); Thread.sleep(step/2); drum.noteOff(42);
-        drum.noteOn(38,vs(115)); drum.noteOn(46,vs(85)); Thread.sleep(step/2); drum.noteOff(38); drum.noteOff(46);
-        drum.noteOn(42,vs(70)); Thread.sleep(step/2); drum.noteOff(42);
+        drum.noteOn(35,boostVel(120)); drum.noteOn(42,boostVel(75)); Thread.sleep(step/2); drum.noteOff(35); drum.noteOff(42);
+        drum.noteOn(42,boostVel(75)); Thread.sleep(step/2); drum.noteOff(42);
+        drum.noteOn(38,boostVel(118)); drum.noteOn(46,boostVel(90)); Thread.sleep(step/2); drum.noteOff(38); drum.noteOff(46);
+        drum.noteOn(42,boostVel(75)); Thread.sleep(step/2); drum.noteOff(42);
     }
 
     private void playTwoBeatBass(Instrument inst) throws InterruptedException {
-        programIfNeeded(inst); MidiChannel ch = channels[inst.getChannel()]; int root = 36 + (inst.getChannel()*2 % 12); long dur = beatLengthMs*2; ch.noteOn(root,vs(110)); Thread.sleep(dur); ch.noteOff(root); }
+        programIfNeeded(inst); MidiChannel ch = channels[inst.getChannel()]; int root = 36 + (inst.getChannel()*2 % 12); long dur = beatLengthMs*2; ch.noteOn(root,boostVel(115)); if(root+12<120) ch.noteOn(root+12, boostVel(70)); Thread.sleep(dur); ch.noteOff(root); if(root+12<120) ch.noteOff(root+12); }
     public void playUltimateSequence() {
-        if (channels == null) return; patternPool.submit(() -> { try { waitForNextBeat(); long total=5000; long prelude=1800; long start=System.currentTimeMillis(); MidiChannel bass=channels[3]; try{ bass.programChange(33);}catch(Exception ignored){} int[] scale={40,43,45,47,48,50,52,55}; while(System.currentTimeMillis()-start<prelude){ for(int n: new int[]{scale[0],scale[3]}) bass.noteOn(n,vs(110)); Thread.sleep(beatLengthMs/2); for(int n: new int[]{scale[0],scale[3]}) bass.noteOff(n); bass.noteOn(scale[2],vs(100)); Thread.sleep(beatLengthMs/2); bass.noteOff(scale[2]); } long burstEnd=start+total; int idx=0; boolean up=true; long step=Math.max(40, beatLengthMs/8); while(System.currentTimeMillis()<burstEnd){ int note=scale[idx]; bass.noteOn(note,vs(127)); Thread.sleep(step); bass.noteOff(note); if(up){ idx++; if(idx>=scale.length){ idx=scale.length-2; up=false;} } else { idx--; if(idx<0){ idx=1; up=true;} } } } catch (InterruptedException ignored) {} }); }
-    private int vs(int vel){
-        return (int)Math.max(0, Math.min(127, Math.round(vel * volumeScale)));
+        if (channels == null) return;
+        patternPool.submit(() -> {
+            try {
+                waitForNextBeat();
+                MidiChannel bass = channels[3];
+                MidiChannel lead = channels[4];
+                MidiChannel drum = channels[9];
+                try { bass.programChange(33); lead.programChange(81);}catch(Exception ignored){}
+                long total=5200; long start=System.currentTimeMillis(); long phase1 = 1600; long phase2 = 3600;
+                int[] chord = {40,47,52,55};
+                // Phase 1: 持续底座 + 渐进鼓
+                while(System.currentTimeMillis()-start < phase1){
+                    for(int n: chord) bass.noteOn(n, ultimateVel(100));
+                    drum.noteOn(35, ultimateVel(127));
+                    Thread.sleep(beatLengthMs/2);
+                    drum.noteOn(42, ultimateVel(90));
+                    Thread.sleep(beatLengthMs/2);
+                    for(int n: chord) bass.noteOff(n);
+                }
+                // Phase 2: 快速上行炫技 + 叠加底鼓
+                int[] scale={52,55,59,64,67,71,76,79,83,88}; int idx=0; long t2Start=System.currentTimeMillis();
+                while(System.currentTimeMillis()-t2Start < (phase2-phase1)){
+                    int note=scale[idx]; lead.noteOn(note, ultimateVel(120)); if(note+12<120) lead.noteOn(note+12, ultimateVel(95));
+                    drum.noteOn(38, ultimateVel(120));
+                    Thread.sleep(Math.max(40, beatLengthMs/6));
+                    lead.noteOff(note); if(note+12<120) lead.noteOff(note+12);
+                    idx=(idx+1)%scale.length;
+                }
+                // Final burst: 琶音扫弦 + 全鼓冲击
+                int[] burst={52,55,59,64,67,71,76};
+                for(int n: burst){ bass.noteOn(n, ultimateVel(127)); lead.noteOn(n+12<120? n+12 : n, ultimateVel(110)); Thread.sleep(60); }
+                drum.noteOn(35,127); drum.noteOn(38,127); drum.noteOn(49,120); drum.noteOn(46,110);
+                Thread.sleep(500);
+                for(int n: burst){ bass.noteOff(n); if(n+12<120) lead.noteOff(n+12); }
+            } catch (InterruptedException ignored) {}
+        });
+    }
+    private int boostVel(int base){
+        int v = (int)Math.round(base * playerBoost * volumeScale); if(v>127) v=127; return Math.max(0,v);
+    }
+    private int ultimateVel(int base){
+        int v = (int)Math.round(base * playerBoost * ultimateBoost * volumeScale); if(v>127) v=127; return Math.max(0,v);
     }
 
     private void programIfNeeded(Instrument inst) {
@@ -278,4 +346,5 @@ public class AudioEngine {
         bgMelodyExec.shutdownNow();
         if (synthesizer != null && synthesizer.isOpen()) synthesizer.close();
     }
+    private int vs(int vel){ int v=(int)Math.round(vel * volumeScale); if(v>127) v=127; return Math.max(0,v); }
 }

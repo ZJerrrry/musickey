@@ -19,51 +19,23 @@ public class AttackEffects {
     /** 粒子粒状烟花 */
     public static class FireworkEffect extends AttackEffect {
         private static class P { double x,y,vx,vy,life,maxLife; Color c; double size; }
+        private static final java.util.Deque<P> P_POOL = new java.util.ArrayDeque<>();
+        private static P obtain(){ P p = P_POOL.pollFirst(); if(p==null) p=new P(); return p; }
+        private static void recycle(P p){ p.vx=p.vy=0; p.life=0; p.maxLife=0; P_POOL.offerFirst(p); }
         private final List<P> ps = new ArrayList<>();
         private final Random r = new Random();
-        private final int cx, cy;
-        public FireworkEffect(int cx, int cy, Color base) {
-            this.cx = cx; this.cy = cy;
-            int count = 65 + r.nextInt(25);
-            for(int i=0;i<count;i++){
-                P p = new P();
-                double ang = r.nextDouble()*Math.PI*2;
-                double sp = 60 + r.nextDouble()*180;
-                p.vx = Math.cos(ang)*sp;
-                p.vy = Math.sin(ang)*sp;
-                p.x = cx; p.y = cy;
-                p.life = 0; p.maxLife = 600 + r.nextInt(500);
-                int rr = Math.min(255, base.getRed() + r.nextInt(80));
-                int gg = Math.min(255, base.getGreen() + r.nextInt(80));
-                int bb = Math.min(255, base.getBlue() + r.nextInt(80));
-                p.c = new Color(rr,gg,bb,255);
-                p.size = 3 + r.nextDouble()*5;
-                ps.add(p);
-            }
-        }
+        private final int cx, cy; private final double density;
+        public FireworkEffect(int cx, int cy, Color base){ this(cx,cy,base,1.0); }
+        public FireworkEffect(int cx,int cy,Color base,double density){ this.cx=cx; this.cy=cy; this.density=density; int baseCount = 65 + r.nextInt(25); int count = Math.max(12, (int)(baseCount * density)); for(int i=0;i<count;i++){ P p = obtain(); double ang = r.nextDouble()*Math.PI*2; double sp = 60 + r.nextDouble()*180; p.vx = Math.cos(ang)*sp; p.vy = Math.sin(ang)*sp; p.x = cx; p.y = cy; p.life = 0; p.maxLife = 600 + r.nextInt(500); int rr = Math.min(255, base.getRed() + r.nextInt(80)); int gg = Math.min(255, base.getGreen() + r.nextInt(80)); int bb = Math.min(255, base.getBlue() + r.nextInt(80)); p.c = new Color(rr,gg,bb,255); p.size = 3 + r.nextDouble()*5; ps.add(p);} }
         @Override public void update(long dt) {
             if(ps.isEmpty()){ alive = false; return; }
-            double dts = dt/1000.0;
-            Iterator<P> it = ps.iterator();
-            while(it.hasNext()){
-                P p = it.next();
-                p.life += dt;
-                p.x += p.vx * dts;
-                p.y += p.vy * dts;
-                p.vy += 40 * dts; // 重力微下坠
-                if(p.life > p.maxLife) it.remove();
-            }
+            double dts = dt/1000.0; Iterator<P> it = ps.iterator();
+            while(it.hasNext()){ P p = it.next(); p.life += dt; p.x += p.vx * dts; p.y += p.vy * dts; p.vy += 40 * dts; if(p.life > p.maxLife){ it.remove(); recycle(p);} }
             if(ps.isEmpty()) alive = false;
         }
         @Override public void draw(Graphics2D g2d) {
             Composite old = g2d.getComposite();
-            for(P p: ps){
-                float alpha = (float)(1.0 - p.life / p.maxLife);
-                alpha = Math.max(0, Math.min(1, alpha));
-                g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
-                g2d.setColor(p.c);
-                g2d.fillOval((int)(p.x - p.size/2), (int)(p.y - p.size/2), (int)p.size, (int)p.size);
-            }
+            for(P p: ps){ float alpha = (float)(1.0 - p.life / p.maxLife); alpha = Math.max(0, Math.min(1, alpha)); g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha)); g2d.setColor(p.c); g2d.fillOval((int)(p.x - p.size/2), (int)(p.y - p.size/2), (int)p.size, (int)p.size); }
             g2d.setComposite(old);
         }
     }
@@ -104,34 +76,11 @@ public class AttackEffects {
     /** 超级烟花特效 */
     public static class SuperFireworkEffect extends AttackEffect {
         private final List<FireworkEffect> bursts = new ArrayList<>();
-        private long elapsed = 0;
-        private final int durationMs = 1600;
-        private final Random r = new Random();
-        private final int w, h;
-        private final Color base;
-        public SuperFireworkEffect(int w, int h, Color base){
-            this.w = w; this.h = h; this.base = base;
-            // 初始三组
-            for(int i=0;i<3;i++) bursts.add(new FireworkEffect(r.nextInt(w), r.nextInt(h/2)+h/8, base));
-        }
-        @Override public void update(long dt){
-            elapsed += dt;
-            if (elapsed < durationMs) {
-                if (r.nextDouble() < 0.18) {
-                    bursts.add(new FireworkEffect(r.nextInt(w), r.nextInt(h/2)+h/8, base));
-                }
-            }
-            Iterator<FireworkEffect> it = bursts.iterator();
-            while(it.hasNext()){
-                FireworkEffect f = it.next();
-                f.update(dt);
-                if(!f.isAlive()) it.remove();
-            }
-            if (elapsed >= durationMs && bursts.isEmpty()) alive = false;
-        }
-        @Override public void draw(Graphics2D g2d){
-            for(FireworkEffect f: bursts) f.draw(g2d);
-        }
+        private long elapsed = 0; private final int durationMs = 1600; private final Random r = new Random(); private final int w, h; private final Color base; private final double density;
+        public SuperFireworkEffect(int w,int h, Color base){ this(w,h,base,1.0); }
+        public SuperFireworkEffect(int w,int h, Color base,double density){ this.w=w; this.h=h; this.base=base; this.density=density; for(int i=0;i<3;i++) bursts.add(new FireworkEffect(r.nextInt(w), r.nextInt(h/2)+h/8, base, density)); }
+        @Override public void update(long dt){ elapsed += dt; if (elapsed < durationMs) { double prob = 0.18 * density; if (r.nextDouble() < prob) bursts.add(new FireworkEffect(r.nextInt(w), r.nextInt(h/2)+h/8, base, density)); } Iterator<FireworkEffect> it = bursts.iterator(); while(it.hasNext()){ FireworkEffect f = it.next(); f.update(dt); if(!f.isAlive()) it.remove(); } if (elapsed >= durationMs && bursts.isEmpty()) alive = false; }
+        @Override public void draw(Graphics2D g2d){ for(FireworkEffect f: bursts) f.draw(g2d); }
     }
 
     /** 全屏波纹特效 */
@@ -207,7 +156,44 @@ public class AttackEffects {
         private final long maxLife; private long life=0; private final int cx,cy; private final int startR; private final String key;
         public CircleTelegraphEffect(int cx,int cy,int startR,long duration,String key){ this.cx=cx;this.cy=cy;this.startR=startR;this.maxLife=duration;this.key=key; }
         @Override public void update(long dt){ life+=dt; if(life>maxLife) alive=false; }
-        @Override public void draw(Graphics2D g){ double p = Math.min(1.0, life/(double)maxLife); int r = (int)(startR*(1-p)); g.setColor(new Color(255,200,80,160)); g.setStroke(new BasicStroke(4f)); g.drawOval(cx-r, cy-r, r*2, r*2); g.setFont(new Font("Monospaced", Font.BOLD, 28)); g.drawString(key, cx- (key.length()*14/2), cy+10); }
+        @Override public void draw(Graphics2D g){
+            double p = Math.min(1.0, life/(double)maxLife);
+            // 主收缩半径 + 轻微呼吸 (sin)
+            double breathe = 1 + 0.06*Math.sin(life/120.0);
+            int r = (int)(startR*(1-p) * breathe); if(r<8) r=8;
+            // 背景淡光圆
+            float coreAlpha = (float)(1 - p);
+            coreAlpha = Math.max(0, Math.min(1, coreAlpha));
+            RadialGradientPaint rg = new RadialGradientPaint(
+                    new Point(cx,cy), r,
+                    new float[]{0f,0.55f,1f},
+                    new Color[]{new Color(255,210,110,(int)(160*coreAlpha)), new Color(255,160,60,(int)(70*coreAlpha)), new Color(255,120,0,0)});
+            Paint old = g.getPaint(); g.setPaint(rg); g.fillOval(cx-r, cy-r, r*2, r*2); g.setPaint(old);
+            // 多层描边 (外亮内暗)
+            Composite oldC = g.getComposite();
+            for(int i=0;i<3;i++){
+                float f = 1 - i/3f; int cr = (int)(r * (1 - i*0.12)); if(cr<=0) break;
+                int alpha = (int)(180 * f * (1-p)); if(alpha<0) alpha=0;
+                g.setStroke(new BasicStroke(Math.max(2f, 6f - i*1.8f)));
+                g.setColor(new Color(255, 200 - i*20, 80 - i*15, alpha));
+                g.drawOval(cx-cr, cy-cr, cr*2, cr*2);
+            }
+            // 脉冲外圈 (快速淡出)
+            double pulsePhase = (life % 500) / 500.0; // 0..1
+            float pulseA = (float)(1 - pulsePhase);
+            int pr = (int)(r + 18 + 42*pulsePhase);
+            g.setStroke(new BasicStroke(2f));
+            g.setColor(new Color(255,230,140,(int)(120*pulseA*(1-p))));
+            g.drawOval(cx-pr, cy-pr, pr*2, pr*2);
+            // 文字提示阴影+本体
+            String disp = key;
+            Font font = new Font("Monospaced", Font.BOLD, 30);
+            g.setFont(font);
+            FontMetrics fm = g.getFontMetrics(); int sw = fm.stringWidth(disp); int tx = cx - sw/2; int ty = cy + fm.getAscent()/2 - 4;
+            g.setColor(new Color(0,0,0,180)); g.fillRoundRect(tx-12, ty-fm.getAscent()-6, sw+24, fm.getHeight()+12, 18,18);
+            g.setColor(new Color(255,245,200)); g.drawString(disp, tx, ty);
+            g.setComposite(oldC);
+        }
     }
     public static class EdgeThreatEffect extends AttackEffect {
         private long life=0; private final long duration; private final String key; private final Color color = new Color(255,40,40);
@@ -234,5 +220,11 @@ public class AttackEffects {
         public HealingBurstEffect(int w,int h, Color base, double speed, long maxLife){ this.cx=w/2; this.cy=h/3; this.maxR=(int)(Math.max(w,h)*0.9); this.base=base; this.speed=speed; this.maxLife=maxLife; }
         @Override public void update(long dt){ life+=dt; r += dt*speed; if(life>maxLife) alive=false; }
         @Override public void draw(Graphics2D g){ float a = (float)(1 - life/(float)maxLife); if(a<0)a=0; g.setColor(new Color(base.getRed(), base.getGreen(), base.getBlue(), (int)(a*180))); g.setStroke(new BasicStroke(6f)); g.drawOval((int)(cx-r),(int)(cy-r),(int)(r*2),(int)(r*2)); }
+    }
+    public static class BlurTelegraphEffect extends AttackEffect {
+        private final long duration; private long life=0; private final int cx,cy; private final int maxR; private final Color base; private final boolean inward;
+        public BlurTelegraphEffect(int cx,int cy,int radius,long duration,Color base, boolean inward){ this.cx=cx; this.cy=cy; this.maxR=radius; this.duration=duration; this.base=base; this.inward=inward; }
+        @Override public void update(long dt){ life+=dt; if(life>duration) alive=false; }
+        @Override public void draw(Graphics2D g){ float p=Math.min(1f, life/(float)duration); int r = inward? (int)(maxR*(1-p)) : (int)(maxR*p); if(r<=0) r=1; int layers=10; Composite old=g.getComposite(); for(int i=layers;i>=1;i--){ float f=i/(float)layers; int rr=(int)(r*f); float a = inward? f*(1-p) : f*(1-p*0.7f); a=Math.min(0.9f,a); g.setColor(new Color(base.getRed(),base.getGreen(),base.getBlue(), (int)(a*140))); g.fillOval(cx-rr, cy-rr, rr*2, rr*2); } g.setComposite(old); }
     }
 }

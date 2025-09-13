@@ -1,20 +1,18 @@
 plugins {
     id 'java'
-    id 'application'
     id 'org.jetbrains.intellij' version '1.17.3'
 }
 
 group = 'org.example'
-version = '1.0-SNAPSHOT'
+version = '1.0.0'
 
 repositories {
     mavenCentral()
 }
 
 intellij {
-    // 使用与本地 IDE 接近的版本，可根据需要调整
     version = '2024.1'
-    type = 'IC' // 社区版
+    type = 'IC'
     plugins = []
 }
 
@@ -24,20 +22,19 @@ java {
     }
 }
 
+// 测试依赖（若后面需要写测试）
 dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-application {
-    mainClass = 'org.example.Main'
-}
-
-// Patch 插件描述中的版本号
 patchPluginXml {
     sinceBuild = '241'
     untilBuild = ''
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
 }
 
 test {

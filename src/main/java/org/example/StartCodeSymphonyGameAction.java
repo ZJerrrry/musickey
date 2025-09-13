@@ -2,12 +2,13 @@ package org.example;
 
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
-import com.intellij.openapi.project.Project;
+import com.intellij.openapi.actionSystem.Presentation;
+import com.intellij.openapi.project.DumbAware;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.*;
 
-public class StartCodeSymphonyGameAction extends AnAction {
+public class StartCodeSymphonyGameAction extends AnAction implements DumbAware {
     private static CodeSymphonyGame existing;
     @Override
     public void actionPerformed(@NotNull AnActionEvent e) {
@@ -24,5 +25,10 @@ public class StartCodeSymphonyGameAction extends AnAction {
             });
         });
     }
-}
 
+    @Override
+    public void update(@NotNull AnActionEvent e) {
+        Presentation p = e.getPresentation();
+        p.setEnabledAndVisible(true); // 始终显示
+    }
+}

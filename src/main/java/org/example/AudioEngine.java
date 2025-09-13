@@ -18,6 +18,10 @@ public class AudioEngine {
     private final ScheduledExecutorService beatScheduler = Executors.newSingleThreadScheduledExecutor();
     private volatile long beatCounter = 0;
 
+    private final ScheduledExecutorService bgMelodyExec = Executors.newSingleThreadScheduledExecutor();
+    private volatile boolean bgRunning = false;
+    private final int BG_CHANNEL = 5; // 预留后台主旋律通道
+
     public AudioEngine() {
         try {
             synthesizer = MidiSystem.getSynthesizer();
@@ -66,76 +70,92 @@ public class AudioEngine {
 
     public int getBpm(){ return bpm; }
 
+    public void startBackgroundMelody(){
+        if (bgRunning || channels == null) return;
+        bgRunning = true;
+        try{ channels[BG_CHANNEL].programChange(0); }catch(Exception ignored){}
+        bgMelodyExec.scheduleWithFixedDelay(this::loopMainMelody, 0, 1, TimeUnit.MILLISECONDS);
+    }
+    private void loopMainMelody(){
+        if(!bgRunning || channels==null) return;
+        try {
+            waitForNextBeat();
+            // 使用 main melody 片段
+            int[][] phrase = {
+                    {72,100},{74,100},{76,100},{79,110},
+                    {76,100},{74,100},{72,100},{67,90},
+                    {69,100},{72,108},{74,108},{72,100},
+                    {67,95},{69,100},{67,90},{64,85}
+            };
+            long step = beatLengthMs/4;
+            MidiChannel ch = channels[BG_CHANNEL];
+            for(int[] n: phrase){ if(!bgRunning) break; ch.noteOn(n[0], n[1]); Thread.sleep(step); ch.noteOff(n[0]); }
+        } catch (InterruptedException ignored) {}
+    }
+
+    public void stopBackgroundMelody(){ bgRunning=false; }
+
     public void playPattern(Instrument instrument) {
         if (channels == null) return;
+        // 玩家触发统一为两拍低音/节奏
         patternPool.submit(() -> {
             try {
-                waitForNextBeat(); // 对齐拍点启动
-                boolean isMain = instrument.getName().contains("函数琴");
+                waitForNextBeat();
                 if (instrument.getSoundType().contains("鼓")) {
-                    playDrumPattern();
-                } else if (instrument.getSoundType().contains("钢琴")) {
-                    if (isMain) playMainMelody(instrument); else playShortPianoStab(instrument);
-                } else if (instrument.getSoundType().contains("小提琴")) {
-                    playShortSustain(instrument, 55);
-                } else if (instrument.getSoundType().contains("萨克斯")) {
-                    playShortArp(instrument, new int[]{62, 65, 69});
-                } else if (instrument.getSoundType().contains("贝斯")) {
-                    playBassPulse(instrument, new int[]{36, 43, 40});
+                    playTwoBeatDrum();
                 } else {
-                    singleNote(instrument, 60, (int)beatLengthMs);
+                    playTwoBeatBass(instrument);
                 }
-            } catch (Exception e) {
-                LOGGER.log(Level.WARNING, "播放模式失败", e);
-            }
+            } catch (Exception e){ LOGGER.log(Level.WARNING, "播放两拍底音失败", e); }
         });
     }
 
-    private void playMainMelody(Instrument inst) throws InterruptedException {
-        programIfNeeded(inst);
-        MidiChannel ch = channels[inst.getChannel()];
-        int vel = 100;
-        int[][] phrase = {
-                {72, vel}, {74, vel}, {76, vel}, {79, vel+5},
-                {76, vel}, {74, vel}, {72, vel}, {67, vel-10},
-                {69, vel}, {72, vel+8}, {74, vel+8}, {72, vel},
-                {67, vel-5}, {69, vel}, {67, vel-5}, {64, vel-10}
-        };
-        long step = beatLengthMs/4; // 16分
-        for (int[] n : phrase) {
-            ch.noteOn(n[0], Math.min(127,n[1]));
-            Thread.sleep(step);
-            ch.noteOff(n[0]);
-        }
+    private void playTwoBeatDrum() throws InterruptedException {
+        MidiChannel drum = channels[9];
+        long step = beatLengthMs; // 一拍
+        // 两拍内：KICK + HAT | SNARE + HAT
+        drum.noteOn(35,120); drum.noteOn(42,70); Thread.sleep(step/2); drum.noteOff(35); drum.noteOff(42);
+        drum.noteOn(42,70); Thread.sleep(step/2); drum.noteOff(42);
+        drum.noteOn(38,115); drum.noteOn(46,85); Thread.sleep(step/2); drum.noteOff(38); drum.noteOff(46);
+        drum.noteOn(42,70); Thread.sleep(step/2); drum.noteOff(42);
     }
 
-    private void playShortPianoStab(Instrument inst) throws InterruptedException {
+    private void playTwoBeatBass(Instrument inst) throws InterruptedException {
         programIfNeeded(inst);
         MidiChannel ch = channels[inst.getChannel()];
-        int[] chord = {60, 64, 67};
-        for (int n: chord) ch.noteOn(n, 90);
-        Thread.sleep(beatLengthMs/3);
-        for (int n: chord) ch.noteOff(n);
+        int root = 36 + (inst.getChannel()*2 % 12); // 简单变调
+        long dur = beatLengthMs*2; // 两拍
+        ch.noteOn(root, 110);
+        Thread.sleep(dur);
+        ch.noteOff(root);
     }
 
-    private void playShortSustain(Instrument inst, int root) throws InterruptedException {
-        programIfNeeded(inst);
-        MidiChannel ch = channels[inst.getChannel()];
-        int[] notes = {root, root+7, root+12};
-        for (int n: notes) ch.noteOn(n, 80);
-        Thread.sleep(beatLengthMs/2);
-        for (int n: notes) ch.noteOff(n);
-    }
-
-    private void playShortArp(Instrument inst, int[] notes) throws InterruptedException {
-        programIfNeeded(inst);
-        MidiChannel ch = channels[inst.getChannel()];
-        long step = beatLengthMs/6;
-        for (int n: notes){
-            ch.noteOn(n, 95);
-            Thread.sleep(step);
-            ch.noteOff(n);
-        }
+    public void playUltimateSequence() {
+        if (channels == null) return;
+        patternPool.submit(() -> {
+            try {
+                waitForNextBeat();
+                long end = System.currentTimeMillis() + 5000; // 至少5秒
+                MidiChannel lead = channels[0];
+                MidiChannel guitar = channels[2];
+                MidiChannel bass = channels[3];
+                try { lead.programChange(30); guitar.programChange(29); bass.programChange(33);} catch(Exception ignored){}
+                int[] powerChord = {52,59,64};
+                for(int n: powerChord) guitar.noteOn(n,120);
+                bass.noteOn(40,120);
+                long step = beatLengthMs/8;
+                int note = 72;
+                while(System.currentTimeMillis()<end){
+                    lead.noteOn(note, 127);
+                    Thread.sleep(step);
+                    lead.noteOff(note);
+                    note += (Math.random()>0.6?2:1);
+                    if (note>84) note=72+(int)(Math.random()*4);
+                }
+                for(int n: powerChord) guitar.noteOff(n);
+                bass.noteOff(40);
+            } catch (InterruptedException ignored) {}
+        });
     }
 
     private void programIfNeeded(Instrument inst) {
@@ -210,35 +230,11 @@ public class AudioEngine {
         }
     }
 
-    public void playUltimateSequence() {
-        if (channels == null) return;
-        patternPool.submit(() -> {
-            try {
-                waitForNextBeat();
-                // 全通道和弦脉冲 + 递进琶音
-                int[] chord = {60, 64, 67, 72};
-                MidiChannel main = channels[0];
-                for (int c: chord) main.noteOn(c, 120);
-                MidiChannel bass = channels[3];
-                bass.noteOn(36, 120);
-                // 琶音急速提升
-                long step = beatLengthMs/8;
-                for (int i=0;i<8;i++){
-                    int note = 72 + i;
-                    main.noteOn(note, 110);
-                    Thread.sleep(step);
-                    main.noteOff(note);
-                }
-                Thread.sleep(beatLengthMs/2);
-                for (int c: chord) main.noteOff(c);
-                bass.noteOff(36);
-            } catch (InterruptedException ignored) {}
-        });
-    }
-
     public void shutdown() {
+        stopBackgroundMelody();
         patternPool.shutdownNow();
         beatScheduler.shutdownNow();
+        bgMelodyExec.shutdownNow();
         if (synthesizer != null && synthesizer.isOpen()) synthesizer.close();
     }
 }

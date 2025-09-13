@@ -30,7 +30,7 @@ public class CodeSymphonyGame extends JFrame {
     private static final long COMBO_WINDOW_MS = 800; // 连击时间窗口
     private double comboMultiplier = 1.0;
 
-    // 自动连击：按住键重复���发
+    // ��动连击：按住键重复���发
     private final Map<Integer, javax.swing.Timer> holdTimers = new LinkedHashMap<>();
     private final Map<Integer, Boolean> keyHolding = new LinkedHashMap<>();
 
@@ -43,9 +43,9 @@ public class CodeSymphonyGame extends JFrame {
     // 技能条 & 超级技能
     private double skillCharge = 0; // 0-100
     private boolean skillReady = false;
-    private static final double SKILL_THRESHOLD = 100.0;
-    private static final double SKILL_GAIN_PER_HIT = 6.5; // 基础获得
-    private static final double SKILL_COMBO_BONUS = 0.25; // 每连击额外百分比
+    private static final double SKILL_THRESHOLD = 300.0; // 三倍蓄力
+    private static final double SKILL_GAIN_PER_HIT = 6.5; // 基础获得不变但阈值提高意味着更久
+    private static final double SKILL_COMBO_BONUS = 0.25; // 补回每连击额外百分比
 
     // Boss 阶段反击
     private int bossPhase = 0; // 0..3
@@ -83,6 +83,15 @@ public class CodeSymphonyGame extends JFrame {
     private boolean ultimateActive = false;
     private long ultimateEnd = 0;
 
+    // 新增：终极技能连击倍率加倍状态
+    private boolean ultimateComboBoost = false;
+    private long ultimateComboEnd = 0;
+
+    // Telegraph 提示相关
+    private AttackEffects.CircleTelegraphEffect pendingTelegraph = null;
+    private boolean telegraphSatisfied = false;
+    private String telegraphKey = "SPACE";
+
     public CodeSymphonyGame() {
         setTitle("音乐编程大作战 - 代码交响曲");
         setSize(WIDTH, HEIGHT);
@@ -101,15 +110,13 @@ public class CodeSymphonyGame extends JFrame {
     private void initGame() {
         createBosses();
         boss = bosses.get(0);
-        instruments = new LinkedHashMap<>(); // 保��顺序
-
-        // 新构造: name, damage, soundType, channel, program, effectType
-        // 通道分配：鼓用9（打击乐），其它乐器各自独立通道
+        instruments = new LinkedHashMap<>();
         instruments.put(0, new Instrument("循环鼓 (A)", 10000, "鼓", 9, 0, Instrument.EffectType.RIPPLE));
         instruments.put(1, new Instrument("函数琴 (S)", 16000, "钢琴", 0, 0, Instrument.EffectType.FIREWORK));
         instruments.put(2, new Instrument("变量提琴 (D)", 20000, "小提琴", 1, 40, Instrument.EffectType.RIPPLE));
         instruments.put(3, new Instrument("递归号 (F)", 24000, "萨克斯", 2, 65, Instrument.EffectType.FIREWORK));
         instruments.put(4, new Instrument("并发贝斯 (G)", 30000, "贝斯", 3, 33, Instrument.EffectType.RIPPLE));
+        audioEngine.startBackgroundMelody();
     }
 
     private void createBosses(){
@@ -198,10 +205,11 @@ public class CodeSymphonyGame extends JFrame {
     private void attemptCounterResolve(){
         if (counterActive && !counterResolved) {
             counterResolved = true; // 成功格挡
-            // 奖励：增加技能能量与轻微抖动
             skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + 25);
             shakeIntensity = Math.min(1.0, shakeIntensity + 0.3);
+            telegraphSatisfied = true;
         }
+        if (pendingTelegraph != null) pendingTelegraph.alive=false;
     }
 
     private void updateBossPhaseIfNeeded(){
@@ -248,17 +256,17 @@ public class CodeSymphonyGame extends JFrame {
         if (!skillReady) return;
         skillReady = false; skillCharge = 0;
         Instrument last = instruments.get(lastUsedInstrumentIndex >=0 ? lastUsedInstrumentIndex : 1);
-        // 屏幕覆盖与音乐
-        synchronized (activeEffects) { activeEffects.add(new AttackEffects.UltimateOverlayEffect(last.getColor())); }
+        synchronized (activeEffects) { activeEffects.add(new AttackEffects.UltimateOverlayEffect(last.getColor(), 5000)); activeEffects.add(new AttackEffects.HackOverlayEffect()); }
         audioEngine.playUltimateSequence();
-        ultimateActive = true; ultimateEnd = System.currentTimeMillis() + 1800;
+        ultimateActive = true; ultimateEnd = System.currentTimeMillis() + 5000;
+        ultimateComboBoost = true; ultimateComboEnd = System.currentTimeMillis() + 10000; // 10秒加倍连击倍率
         AttackEffect eff = (last.getEffectType()== Instrument.EffectType.FIREWORK)
                 ? new AttackEffects.SuperFireworkEffect(getWidth(), getHeight(), last.getColor())
                 : new AttackEffects.FullScreenRippleEffect(getWidth(), getHeight(), last.getColor());
         synchronized (activeEffects) { activeEffects.add(eff); }
-        int bonusDmg = (int)(boss.getMaxHealth() * 0.02 + comboCount * 500);
+        int bonusDmg = (int)(boss.getMaxHealth() * 0.03 + comboCount * 800); // 稍微提升
         applyBossDamage(bonusDmg);
-        shakeIntensity = Math.min(1.0, shakeIntensity + 0.5);
+        shakeIntensity = Math.min(1.0, shakeIntensity + 0.7);
     }
 
     private void scheduleNextBossSkill(){
@@ -272,71 +280,58 @@ public class CodeSymphonyGame extends JFrame {
         if (now < nextSkillTime || bossSkill != BossSkillType.NONE || counterActive) return;
         // 根据Boss类型选择技能
         if (boss instanceof BugBoss) {
-            bossSkill = BossSkillType.ABSORB; // 吸收波��
-            bossSkillEnd = now + 3000;
-            absorbAccum = 0;
+            bossSkill = BossSkillType.ABSORB; bossSkillEnd = now + 3000; absorbAccum = 0; spawnTelegraph("SPACE", 1800);
         } else if (boss instanceof MatrixBoss) {
-            bossSkill = BossSkillType.REFLECT; // 反射
-            bossSkillEnd = now + 2500;
-            reflectActive = true;
+            bossSkill = BossSkillType.REFLECT; bossSkillEnd = now + 2500; reflectActive = true; spawnTelegraph("SPACE", 1600);
         } else if (boss instanceof NeuralCoreBoss) {
-            bossSkill = BossSkillType.CORE_PULSE; // 脉冲
-            bossSkillEnd = now + 3200;
-            synchronized (activeEffects){ activeEffects.add(new AttackEffects.CorePulseEffect(getWidth(), getHeight(), new Color(120,200,255))); }
+            bossSkill = BossSkillType.CORE_PULSE; bossSkillEnd = now + 3200; synchronized (activeEffects){ activeEffects.add(new AttackEffects.CorePulseEffect(getWidth(), getHeight(), new Color(120,200,255))); } spawnTelegraph("SPACE", 2000);
         }
+    }
+
+    private void spawnTelegraph(String key, long duration){
+        telegraphKey = key; telegraphSatisfied=false;
+        pendingTelegraph = new AttackEffects.CircleTelegraphEffect(getWidth()/2, getHeight()/3, 260, duration, key);
+        synchronized (activeEffects){ activeEffects.add(pendingTelegraph); }
     }
 
     private void updateBossSkillState(){
         long now = System.currentTimeMillis();
         if (bossSkill != BossSkillType.NONE && now > bossSkillEnd){
-            // 技能结束效果
             if (bossSkill == BossSkillType.ABSORB && absorbAccum > 0){
-                // 吸收后释放，转化为伤害返还（可被 SPACE 格挡，使用与反击共通��
-                boss.takeDamage(-(int)Math.min(boss.getMaxHealth()*0.01, absorbAccum*0.5)); // 吸收给自己回血上限1%
+                // 吸收结束爆炸：造成小范围视觉与回血效果已处理，新增爆炸特效
+                synchronized (activeEffects){ activeEffects.add(new AttackEffects.FullScreenRippleEffect(getWidth(), getHeight(), new Color(255,140,90))); }
+                // 吸收回血逻辑
+                boss.takeDamage(-(int)Math.min(boss.getMaxHealth()*0.01, absorbAccum*0.5));
             }
-            if (bossSkill == BossSkillType.REFLECT){
-                reflectActive = false;
-            }
-            bossSkill = BossSkillType.NONE;
-            scheduleNextBossSkill();
+            if (bossSkill == BossSkillType.REFLECT){ reflectActive = false; }
+            bossSkill = BossSkillType.NONE; if(pendingTelegraph!=null) pendingTelegraph.alive=false; scheduleNextBossSkill();
         }
     }
 
     private void applyBossDamage(int dmg){
-        // 处理技能态：吸收/反射
-        if (bossSkill == BossSkillType.ABSORB){
-            absorbAccum += dmg;
-            shakeIntensity = Math.min(1.0, shakeIntensity + dmg / (double)boss.getMaxHealth());
-            return; // 不直接伤害
-        }
-        if (bossSkill == BossSkillType.REFLECT && reflectActive){
-            // 反射：伤害打回来（可被空间格挡? 简化为直接扣连击）
-            comboCount = Math.max(0, comboCount - 5);
-            return;
-        }
-        boss.takeDamage(dmg);
-        score += dmg; totalScore += dmg;
-        if (boss.getHealth() <= 0) onBossDefeated();
+        if (bossSkill == BossSkillType.ABSORB){ absorbAccum += dmg; shakeIntensity = Math.min(1.0, shakeIntensity + dmg / (double)boss.getMaxHealth()); return; }
+        if (bossSkill == BossSkillType.REFLECT && reflectActive){ comboCount = Math.max(0, comboCount - 5); damageFlashEdge(); return; }
+        boss.takeDamage(dmg); score += dmg; totalScore += dmg; if (boss.getHealth() <= 0) onBossDefeated();
     }
 
+    private void damageFlashEdge(){ darkAlpha = 0.4f; }
+
     private void triggerInstrument(int instrumentIndex) {
-        Instrument instrument = instruments.get(instrumentIndex);
-        if (instrument == null) return;
+        Instrument instrument = instruments.get(instrumentIndex); if (instrument == null) return;
         if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
         maybeActivateBossSkill();
         long now = System.currentTimeMillis();
         if (now - lastTriggerTime <= COMBO_WINDOW_MS) comboCount++; else comboCount = 1;
         lastTriggerTime = now;
-        comboMultiplier = 1.0 + Math.min(1.5, comboCount * 0.05);
+        double comboBase = 1.0 + Math.min(1.5, comboCount * 0.05);
+        if (ultimateComboBoost && System.currentTimeMillis()<ultimateComboEnd) comboMultiplier = comboBase * 2.0; else { comboMultiplier = comboBase; if (ultimateComboBoost && System.currentTimeMillis()>=ultimateComboEnd) ultimateComboBoost=false; }
         audioEngine.playPattern(instrument);
-        int baseDamage = instrument.getDamage();
-        int finalDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
+        int baseDamage = instrument.getDamage(); int finalDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
         applyBossDamage(finalDamage);
         shakeIntensity = Math.min(1.0, shakeIntensity + finalDamage / 6_000_000.0);
         if (instrument.getSoundType().contains("鼓") || instrument.getSoundType().contains("贝斯")) bassPulseAmp = Math.min(1.0, bassPulseAmp + 0.35);
         spawnEffectForInstrument(instrument);
-        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS;
-        skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain);
+        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain);
         if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
         lastUsedInstrumentIndex = instrumentIndex;
     }
@@ -541,6 +536,13 @@ public class CodeSymphonyGame extends JFrame {
             // 显示BPM
             g2d.setColor(Color.WHITE);
             g2d.drawString("BPM:"+audioEngine.getBpm()+" ↑↓调整", getWidth()-170, getHeight()-30);
+
+            // 在已有UI绘制末尾补充反射闪烁边框
+            if (reflectActive && bossSkill == BossSkillType.REFLECT){ float a = (float)(0.5 + 0.5*Math.sin(System.currentTimeMillis()/120.0)); g2d.setColor(new Color(255,255,0,(int)(120*a))); g2d.setStroke(new BasicStroke(6f)); g2d.drawRect(5,5,getWidth()-10,getHeight()-10); }
+
+            // Telegraph 提示文本
+            if (pendingTelegraph != null && pendingTelegraph.isAlive() && !telegraphSatisfied){ g2d.setColor(new Color(255,200,120)); g2d.setFont(new Font("Monospaced", Font.BOLD, 16)); g2d.drawString("按 " + telegraphKey + " 抵挡!", getWidth()/2 - 60, getHeight()/3 + 160); }
+            if (ultimateComboBoost){ g2d.setColor(new Color(255,240,90)); g2d.drawString("终极连击 x2", 20, 70); }
         }
     }
 

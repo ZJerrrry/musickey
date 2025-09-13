@@ -182,9 +182,31 @@ public class AttackEffects {
     }
     /** 终极技能覆盖特效 */
     public static class UltimateOverlayEffect extends AttackEffect {
-        private long life=0; private final long maxLife=1800; private final Color base;
-        public UltimateOverlayEffect(Color base){ this.base=base; }
+        private long life=0; private final long maxLife; private final Color base;
+        public UltimateOverlayEffect(Color base){ this(base,5000); }
+        public UltimateOverlayEffect(Color base,long durationMs){ this.base=base; this.maxLife=durationMs; }
         @Override public void update(long dt){ life+=dt; if(life>maxLife) alive=false; }
         @Override public void draw(Graphics2D g){ float p = Math.min(1f, life/(float)maxLife); int alpha = (int)(255*(1-Math.abs(0.5f-p)*2)); g.setColor(new Color(base.getRed(),base.getGreen(),base.getBlue(), Math.min(200,alpha))); g.fillRect(0,0,g.getClipBounds().width,g.getClipBounds().height); }
+    }
+    public static class HackOverlayEffect extends AttackEffect {
+        private long life=0; private final long maxLife=5000; private final Random r = new Random();
+        @Override public void update(long dt){ life+=dt; if(life>maxLife) alive=false; }
+        @Override public void draw(Graphics2D g){ int w=g.getClipBounds().width; int h=g.getClipBounds().height; float progress=life/(float)maxLife; // 扫描线
+            for(int i=0;i<25;i++){ int y=(int)((((life/40)+i*18)%h)); g.setColor(new Color(0,255,160,40)); g.drawLine(0,y,w,y); }
+            // 随机代码雨块
+            for(int i=0;i<80;i++){ if(r.nextDouble()<0.15){ int x=r.nextInt(w); int y=r.nextInt(h); int len=8+r.nextInt(18); g.setColor(new Color(0,255,120,80)); g.drawLine(x,y,x,y+len); }}
+            // Glitch 条
+            if(r.nextDouble()<0.2){ int gh=10+r.nextInt(30); int gy=r.nextInt(h-gh); g.setColor(new Color(0,255,200,60)); g.fillRect(0,gy,w,gh); }
+            // 渐隐网格
+            g.setColor(new Color(0,180,100,(int)(90*(1-progress))));
+            for(int x=0;x<w;x+=50) g.drawLine(x,0,x,h);
+            for(int y=0;y<h;y+=40) g.drawLine(0,y,w,y);
+        }
+    }
+    public static class CircleTelegraphEffect extends AttackEffect {
+        private final long maxLife; private long life=0; private final int cx,cy; private final int startR; private final String key;
+        public CircleTelegraphEffect(int cx,int cy,int startR,long duration,String key){ this.cx=cx;this.cy=cy;this.startR=startR;this.maxLife=duration;this.key=key; }
+        @Override public void update(long dt){ life+=dt; if(life>maxLife) alive=false; }
+        @Override public void draw(Graphics2D g){ double p = Math.min(1.0, life/(double)maxLife); int r = (int)(startR*(1-p)); g.setColor(new Color(255,200,80,160)); g.setStroke(new BasicStroke(4f)); g.drawOval(cx-r, cy-r, r*2, r*2); g.setFont(new Font("Monospaced", Font.BOLD, 28)); g.drawString(key, cx- (key.length()*14/2), cy+10); }
     }
 }

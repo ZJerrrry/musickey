@@ -26,13 +26,22 @@ public class AudioEngine {
     private final int[][] ARP_NOTES = { {72,76,79,83}, {74,77,81,84}, {76,79,83,86}, {71,74,77,81} };
     private final int[][] COUNTER_LINE = { {84,83,81,79}, {83,81,79,76}, {86,84,83,81}, {83,81,79,76} };
 
+    private volatile double volumeScale = 1.0; // 0.0 - 1.0
+
+    // 新增：多段主旋律控制 (Sicko风格 A/B/C)
+    private static final int SECTION_LENGTH_BARS = 4; // 每段4小节
+    private static final int TOTAL_SECTIONS = 3; // A B C
+    private volatile long barCounter = 0;
+    private int barsPerChord = 1; // 和弦持续
+    private int[] dropBassPattern = {36,36,36,38, 36,36,41,43};
+
     public AudioEngine() {
         try {
             synthesizer = MidiSystem.getSynthesizer();
             synthesizer.open();
             channels = synthesizer.getChannels();
         } catch (MidiUnavailableException e) {
-            LOGGER.log(Level.SEVERE, "无法初始化���成器", e);
+            LOGGER.log(Level.SEVERE, "无法初始化合成器", e);
         }
         setBpm(bpm);
         startBeatClock();
@@ -73,6 +82,8 @@ public class AudioEngine {
     }
 
     public int getBpm(){ return bpm; }
+    public void setVolume(int vol){ volumeScale = Math.max(0, Math.min(100, vol))/100.0; }
+    public int getVolume(){ return (int)Math.round(volumeScale*100); }
 
     public void startBackgroundMelody(){
         if (bgRunning || channels == null) return;
@@ -84,39 +95,82 @@ public class AudioEngine {
         if(!bgRunning || channels==null) return;
         try {
             waitForNextBeat();
-            int sec = bgSectionIndex % PAD_CHORDS.length;
-            long step16 = beatLengthMs/4; // 16分
-            MidiChannel padCh = channels[BG_CHANNEL];
-            MidiChannel arpCh = channels[ (BG_CHANNEL+1) % channels.length];
-            MidiChannel counterCh = channels[ (BG_CHANNEL+2) % channels.length];
-            try { padCh.programChange(91); arpCh.programChange(0); counterCh.programChange(40);} catch(Exception ignored){}
-            // Pad 按住两拍
-            for(int n: PAD_CHORDS[sec]) padCh.noteOn(n,70);
-            // Arp 8 个16分 = 2拍
-            for(int i=0;i<8;i++){
-                int note = ARP_NOTES[sec][i % ARP_NOTES[sec].length];
-                arpCh.noteOn(note, 90);
-                Thread.sleep(step16);
-                arpCh.noteOff(note);
+            // 每4拍为一小节
+            long currentBeat = currentBeat();
+            boolean newBar = (currentBeat % 4)==0;
+            if(newBar) barCounter++;
+            int section = (int)((barCounter / SECTION_LENGTH_BARS) % TOTAL_SECTIONS); // 0:A 1:B 2:C
+            switch(section){
+                case 0 -> playSectionA(currentBeat);
+                case 1 -> playSectionB(currentBeat);
+                case 2 -> playSectionC(currentBeat);
             }
-            // Counter phrase（再两拍）
-            for(int n: PAD_CHORDS[sec]) padCh.noteOn(n,60); // 重新轻按保证持续
-            for(int i=0;i<8;i++){
-                int note = COUNTER_LINE[sec][i % COUNTER_LINE[sec].length];
-                counterCh.noteOn(note,85);
-                Thread.sleep(step16);
-                counterCh.noteOff(note);
-            }
-            for(int n: PAD_CHORDS[sec]) padCh.noteOff(n);
-            bgSectionIndex++;
-        } catch (InterruptedException ignored) {}
+        } catch (Exception ignored) {}
     }
 
+    private void playSectionA(long beat) throws InterruptedException {
+        // Sparse pad + occasional arp tail on bar end
+        MidiChannel pad = channels[BG_CHANNEL];
+        MidiChannel perc = channels[9];
+        try { pad.programChange(91);}catch(Exception ignored){}
+        int bar = (int)((beat/4)%SECTION_LENGTH_BARS);
+        if(beat % 4 == 0){ // bar start chord
+            int root = switch(bar){
+                case 0 -> 48; // C
+                case 1 -> 50; // D
+                case 2 -> 53; // F
+                default -> 55; // G
+            };
+            int[] chord = {root, root+4, root+7, root+11};
+            for(int n: chord) pad.noteOn(n,vs(60));
+        }
+        // simple kick on beats 0 and 2 of each bar
+        if((beat %4)==0 || (beat %4)==2){ perc.noteOn(35,vs(110)); }
+        // last beat arp fill
+        if((beat %4)==3){ int[] fill={72,76,79}; MidiChannel arp=channels[(BG_CHANNEL+1)%channels.length]; for(int n:fill){ arp.noteOn(n,vs(80)); Thread.sleep(beatLengthMs/6); arp.noteOff(n);} }
+    }
+
+    private void playSectionB(long beat) throws InterruptedException {
+        // Busy syncopated arp + snare off-beat
+        MidiChannel arp = channels[(BG_CHANNEL+1)%channels.length];
+        MidiChannel drum = channels[9];
+        try { arp.programChange(0);}catch(Exception ignored){}
+        // 16分琶音循环
+        int[] scale={72,74,76,79,81};
+        long step = beatLengthMs/4; // 16分
+        for(int i=0;i<4;i++){
+            int note = scale[(int)((beat*4+i)%scale.length)];
+            arp.noteOn(note,vs(90));
+            Thread.sleep(step/2);
+            arp.noteOff(note);
+            Thread.sleep(step/2);
+        }
+        // Snare on off-beat (beat 1 & 3)
+        if((beat %4)==1 || (beat %4)==3){ drum.noteOn(38,vs(100)); }
+        // Hi-hat each 8th
+        drum.noteOn(42,vs(50));
+    }
+
+    private void playSectionC(long beat) throws InterruptedException {
+        // Drop: strong bass pulses + rapid hat + rising synth stab
+        MidiChannel bass = channels[(BG_CHANNEL+2)%channels.length];
+        MidiChannel drum = channels[9];
+        try { bass.programChange(33);}catch(Exception ignored){}
+        int idx = (int)(beat % dropBassPattern.length);
+        int note = dropBassPattern[idx];
+        bass.noteOn(note,vs(120));
+        Thread.sleep(beatLengthMs/3);
+        bass.noteOff(note);
+        // trap style hats 3 subdivisions
+        for(int i=0;i<3;i++){ drum.noteOn(42,vs(55)); Thread.sleep(beatLengthMs/6); }
+        // Clap every 2 beats
+        if((beat %2)==1){ drum.noteOn(39,vs(100)); }
+    }
     public void stopBackgroundMelody(){ bgRunning=false; }
 
     public void playPattern(Instrument instrument) {
         if (channels == null) return;
-        // 玩家触发统一为两拍低音/节��
+        // 玩家触发统一为两拍低音 / 鼓点
         patternPool.submit(() -> {
             try {
                 waitForNextBeat();
@@ -130,58 +184,19 @@ public class AudioEngine {
     }
 
     private void playTwoBeatDrum() throws InterruptedException {
-        MidiChannel drum = channels[9];
-        long step = beatLengthMs; // 一拍
-        // 两拍内：KICK + HAT | SNARE + HAT
-        drum.noteOn(35,120); drum.noteOn(42,70); Thread.sleep(step/2); drum.noteOff(35); drum.noteOff(42);
-        drum.noteOn(42,70); Thread.sleep(step/2); drum.noteOff(42);
-        drum.noteOn(38,115); drum.noteOn(46,85); Thread.sleep(step/2); drum.noteOff(38); drum.noteOff(46);
-        drum.noteOn(42,70); Thread.sleep(step/2); drum.noteOff(42);
+        MidiChannel drum = channels[9]; long step = beatLengthMs;
+        drum.noteOn(35,vs(120)); drum.noteOn(42,vs(70)); Thread.sleep(step/2); drum.noteOff(35); drum.noteOff(42);
+        drum.noteOn(42,vs(70)); Thread.sleep(step/2); drum.noteOff(42);
+        drum.noteOn(38,vs(115)); drum.noteOn(46,vs(85)); Thread.sleep(step/2); drum.noteOff(38); drum.noteOff(46);
+        drum.noteOn(42,vs(70)); Thread.sleep(step/2); drum.noteOff(42);
     }
 
     private void playTwoBeatBass(Instrument inst) throws InterruptedException {
-        programIfNeeded(inst);
-        MidiChannel ch = channels[inst.getChannel()];
-        int root = 36 + (inst.getChannel()*2 % 12); // 简单变调
-        long dur = beatLengthMs*2; // 两拍
-        ch.noteOn(root, 110);
-        Thread.sleep(dur);
-        ch.noteOff(root);
-    }
-
+        programIfNeeded(inst); MidiChannel ch = channels[inst.getChannel()]; int root = 36 + (inst.getChannel()*2 % 12); long dur = beatLengthMs*2; ch.noteOn(root,vs(110)); Thread.sleep(dur); ch.noteOff(root); }
     public void playUltimateSequence() {
-        if (channels == null) return;
-        patternPool.submit(() -> {
-            try {
-                waitForNextBeat();
-                long total = 5000; // 5秒总时长
-                long prelude = 1800; // 前奏
-                long start = System.currentTimeMillis();
-                MidiChannel bass = channels[3];
-                try { bass.programChange(33);} catch(Exception ignored){}
-                int[] scale = {40,43,45,47,48,50,52,55};
-                // 前奏：低频间隔脉冲
-                while(System.currentTimeMillis()-start < prelude){
-                    for(int n: new int[]{scale[0], scale[3]}){ bass.noteOn(n,110); }
-                    Thread.sleep(beatLengthMs/2);
-                    for(int n: new int[]{scale[0], scale[3]}){ bass.noteOff(n); }
-                    bass.noteOn(scale[2],100);
-                    Thread.sleep(beatLengthMs/2);
-                    bass.noteOff(scale[2]);
-                }
-                // 爆发阶段：快速上行/下行滑音
-                long burstEnd = start + total;
-                int idx = 0; boolean up = true;
-                long step = Math.max(40, beatLengthMs/8);
-                while(System.currentTimeMillis()<burstEnd){
-                    int note = scale[idx];
-                    bass.noteOn(note, 127);
-                    Thread.sleep(step);
-                    bass.noteOff(note);
-                    if(up){ idx++; if(idx>=scale.length){ idx=scale.length-2; up=false;} } else { idx--; if(idx<0){ idx=1; up=true;} }
-                }
-            } catch (InterruptedException ignored) {}
-        });
+        if (channels == null) return; patternPool.submit(() -> { try { waitForNextBeat(); long total=5000; long prelude=1800; long start=System.currentTimeMillis(); MidiChannel bass=channels[3]; try{ bass.programChange(33);}catch(Exception ignored){} int[] scale={40,43,45,47,48,50,52,55}; while(System.currentTimeMillis()-start<prelude){ for(int n: new int[]{scale[0],scale[3]}) bass.noteOn(n,vs(110)); Thread.sleep(beatLengthMs/2); for(int n: new int[]{scale[0],scale[3]}) bass.noteOff(n); bass.noteOn(scale[2],vs(100)); Thread.sleep(beatLengthMs/2); bass.noteOff(scale[2]); } long burstEnd=start+total; int idx=0; boolean up=true; long step=Math.max(40, beatLengthMs/8); while(System.currentTimeMillis()<burstEnd){ int note=scale[idx]; bass.noteOn(note,vs(127)); Thread.sleep(step); bass.noteOff(note); if(up){ idx++; if(idx>=scale.length){ idx=scale.length-2; up=false;} } else { idx--; if(idx<0){ idx=1; up=true;} } } } catch (InterruptedException ignored) {} }); }
+    private int vs(int vel){
+        return (int)Math.max(0, Math.min(127, Math.round(vel * volumeScale)));
     }
 
     private void programIfNeeded(Instrument inst) {

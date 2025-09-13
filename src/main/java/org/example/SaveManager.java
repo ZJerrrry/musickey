@@ -21,6 +21,8 @@ public class SaveManager {
         public int comboCount;
         public double[] bossHealths; // 对应每个boss当前生命
         public long ultimateComboRemainMs; // 终极连击剩余
+        public int volume = 100; // 新增
+        public int bpmMax = 180; // 新增
     }
 
     public static void save(SaveData data) {
@@ -53,6 +55,8 @@ public class SaveManager {
         sb.append("\"skillCharge\":").append(String.format("%.2f", d.skillCharge)).append(',');
         sb.append("\"comboCount\":").append(d.comboCount).append(',');
         sb.append("\"ultimateComboRemainMs\":").append(d.ultimateComboRemainMs).append(',');
+        sb.append("\"volume\":").append(d.volume).append(',');
+        sb.append("\"bpmMax\":").append(d.bpmMax).append(',');
         sb.append("\"bossHealths\":[");
         for(int i=0;i<d.bossHealths.length;i++){ if(i>0) sb.append(','); sb.append(String.format("%.0f", d.bossHealths[i])); }
         sb.append(']');
@@ -84,6 +88,8 @@ public class SaveManager {
         d.skillCharge = extractNumber(s, "skillCharge", 0);
         d.comboCount = (int)extractNumber(s, "comboCount", 0);
         d.ultimateComboRemainMs = (long)extractNumber(s, "ultimateComboRemainMs", 0);
+        d.volume = (int)extractNumber(s, "volume", 100);
+        d.bpmMax = (int)extractNumber(s, "bpmMax", 180);
         if(d.bossHealths==null){
             d.bossHealths = maxHealths.clone();
         }
@@ -104,4 +110,3 @@ public class SaveManager {
         try { return Double.parseDouble(s.substring(start,end)); } catch(Exception e){ return def; }
     }
 }
-

@@ -71,6 +71,18 @@ public class CodeSymphonyGame extends JFrame {
     private int score = 0; // 当前Boss内得分
     private int lastUsedInstrumentIndex = -1; // 最近使用乐器索引
 
+    // Boss专属技能状态
+    private enum BossSkillType { NONE, ABSORB, REFLECT, CORE_PULSE }
+    private BossSkillType bossSkill = BossSkillType.NONE;
+    private long bossSkillEnd = 0;
+    private boolean reflectActive = false;
+    private double absorbAccum = 0; // 吸收期间累计伤害
+    private long nextSkillTime = 0; // 下次技能触发时间
+
+    // 终极技能屏幕标记
+    private boolean ultimateActive = false;
+    private long ultimateEnd = 0;
+
     public CodeSymphonyGame() {
         setTitle("音乐编程大作战 - 代码交响曲");
         setSize(WIDTH, HEIGHT);
@@ -104,6 +116,7 @@ public class CodeSymphonyGame extends JFrame {
         bosses.clear();
         bosses.add(new BugBoss(12_000_000, "code"));
         bosses.add(new MatrixBoss(18_000_000, "matrix"));
+        bosses.add(new NeuralCoreBoss(25_000_000, "core"));
     }
 
     private void initUI() {
@@ -137,6 +150,9 @@ public class CodeSymphonyGame extends JFrame {
         addKeyBinding(gamePanel, KeyStroke.getKeyStroke('q'), "SUPER_q", this::triggerSuperSkill);
         // 反击格挡 SPACE
         addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_SPACE,0), "COUNTER_SPACE", this::attemptCounterResolve);
+        // BPM 调整 上下键
+        addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_UP,0), "BPM_UP", () -> changeBpm(4));
+        addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_DOWN,0), "BPM_DOWN", () -> changeBpm(-4));
 
         gamePanel.setFocusable(true);
         gamePanel.requestFocusInWindow();
@@ -151,7 +167,7 @@ public class CodeSymphonyGame extends JFrame {
         });
     }
 
-    // 动态重复间隔（减速后更长）
+    // 动态��复间隔（减速后更长）
     private int computeRepeatIntervalMs(){
         double base = 160; // 原周期间隔
         if (slowFactor < 1.0) {
@@ -223,88 +239,123 @@ public class CodeSymphonyGame extends JFrame {
         }
     }
 
-    private void triggerInstrument(int instrumentIndex) {
-        Instrument instrument = instruments.get(instrumentIndex);
-        if (instrument == null) return;
-        if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) {
-            slowFactor = 1.0; // 恢复
-        }
-        long now = System.currentTimeMillis();
-        if (now - lastTriggerTime <= COMBO_WINDOW_MS) {
-            comboCount++;
-        } else {
-            comboCount = 1;
-        }
-        lastTriggerTime = now;
-        comboMultiplier = 1.0 + Math.min(1.5, comboCount * 0.05); // 最高+150%
-
-        // 播放音频模式
-        audioEngine.playPattern(instrument);
-
-        // 造成伤害
-        int baseDamage = instrument.getDamage();
-        int finalDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor); // 减速时同时降低输出
-        boss.takeDamage(finalDamage);
-        score += finalDamage;
-        totalScore += finalDamage;
-        // 抖动提升（与伤害相关）
-        shakeIntensity = Math.min(1.0, shakeIntensity + finalDamage / 6_000_000.0);
-
-        // 鼓/贝斯驱动低频脉冲
-        if (instrument.getSoundType().contains("鼓") || instrument.getSoundType().contains("贝斯")) {
-            bassPulseAmp = Math.min(1.0, bassPulseAmp + 0.35);
-        }
-
-        // 生成特效
-        spawnEffectForInstrument(instrument);
-
-        // 技能增长
-        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS;
-        skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain);
-        if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
-
-        // 检查结束
-        if (boss.getHealth() <= 0) {
-            onBossDefeated();
-        }
-        lastUsedInstrumentIndex = instrumentIndex;
+    private void changeBpm(int delta){
+        int newBpm = Math.max(60, Math.min(180, audioEngine.getBpm() + delta));
+        audioEngine.setBpm(newBpm);
     }
 
     private void triggerSuperSkill() {
         if (!skillReady) return;
         skillReady = false; skillCharge = 0;
         Instrument last = instruments.get(lastUsedInstrumentIndex >=0 ? lastUsedInstrumentIndex : 1);
+        // 屏幕覆盖与音乐
+        synchronized (activeEffects) { activeEffects.add(new AttackEffects.UltimateOverlayEffect(last.getColor())); }
+        audioEngine.playUltimateSequence();
+        ultimateActive = true; ultimateEnd = System.currentTimeMillis() + 1800;
         AttackEffect eff = (last.getEffectType()== Instrument.EffectType.FIREWORK)
                 ? new AttackEffects.SuperFireworkEffect(getWidth(), getHeight(), last.getColor())
                 : new AttackEffects.FullScreenRippleEffect(getWidth(), getHeight(), last.getColor());
         synchronized (activeEffects) { activeEffects.add(eff); }
-        int bonusDmg = (int)(boss.getMaxHealth() * 0.02 + comboCount * 500); // 调整大血量下的技能伤害
-        boss.takeDamage(bonusDmg);
-        score += bonusDmg; totalScore += bonusDmg;
+        int bonusDmg = (int)(boss.getMaxHealth() * 0.02 + comboCount * 500);
+        applyBossDamage(bonusDmg);
         shakeIntensity = Math.min(1.0, shakeIntensity + 0.5);
+    }
+
+    private void scheduleNextBossSkill(){
+        long now = System.currentTimeMillis();
+        // 每 8~14 秒之间触发一次（取随机+放松体验）
+        nextSkillTime = now + 8000 + new Random().nextInt(6000);
+    }
+
+    private void maybeActivateBossSkill(){
+        long now = System.currentTimeMillis();
+        if (now < nextSkillTime || bossSkill != BossSkillType.NONE || counterActive) return;
+        // 根据Boss类型选择技能
+        if (boss instanceof BugBoss) {
+            bossSkill = BossSkillType.ABSORB; // 吸收波��
+            bossSkillEnd = now + 3000;
+            absorbAccum = 0;
+        } else if (boss instanceof MatrixBoss) {
+            bossSkill = BossSkillType.REFLECT; // 反射
+            bossSkillEnd = now + 2500;
+            reflectActive = true;
+        } else if (boss instanceof NeuralCoreBoss) {
+            bossSkill = BossSkillType.CORE_PULSE; // 脉冲
+            bossSkillEnd = now + 3200;
+            synchronized (activeEffects){ activeEffects.add(new AttackEffects.CorePulseEffect(getWidth(), getHeight(), new Color(120,200,255))); }
+        }
+    }
+
+    private void updateBossSkillState(){
+        long now = System.currentTimeMillis();
+        if (bossSkill != BossSkillType.NONE && now > bossSkillEnd){
+            // 技能结束效果
+            if (bossSkill == BossSkillType.ABSORB && absorbAccum > 0){
+                // 吸收后释放，转化为伤害返还（可被 SPACE 格挡，使用与反击共通��
+                boss.takeDamage(-(int)Math.min(boss.getMaxHealth()*0.01, absorbAccum*0.5)); // 吸收给自己回血上限1%
+            }
+            if (bossSkill == BossSkillType.REFLECT){
+                reflectActive = false;
+            }
+            bossSkill = BossSkillType.NONE;
+            scheduleNextBossSkill();
+        }
+    }
+
+    private void applyBossDamage(int dmg){
+        // 处理技能态：吸收/反射
+        if (bossSkill == BossSkillType.ABSORB){
+            absorbAccum += dmg;
+            shakeIntensity = Math.min(1.0, shakeIntensity + dmg / (double)boss.getMaxHealth());
+            return; // 不直接伤害
+        }
+        if (bossSkill == BossSkillType.REFLECT && reflectActive){
+            // 反射：伤害打回来（可被空间格挡? 简化为直接扣连击）
+            comboCount = Math.max(0, comboCount - 5);
+            return;
+        }
+        boss.takeDamage(dmg);
+        score += dmg; totalScore += dmg;
         if (boss.getHealth() <= 0) onBossDefeated();
     }
 
+    private void triggerInstrument(int instrumentIndex) {
+        Instrument instrument = instruments.get(instrumentIndex);
+        if (instrument == null) return;
+        if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
+        maybeActivateBossSkill();
+        long now = System.currentTimeMillis();
+        if (now - lastTriggerTime <= COMBO_WINDOW_MS) comboCount++; else comboCount = 1;
+        lastTriggerTime = now;
+        comboMultiplier = 1.0 + Math.min(1.5, comboCount * 0.05);
+        audioEngine.playPattern(instrument);
+        int baseDamage = instrument.getDamage();
+        int finalDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
+        applyBossDamage(finalDamage);
+        shakeIntensity = Math.min(1.0, shakeIntensity + finalDamage / 6_000_000.0);
+        if (instrument.getSoundType().contains("鼓") || instrument.getSoundType().contains("贝斯")) bassPulseAmp = Math.min(1.0, bassPulseAmp + 0.35);
+        spawnEffectForInstrument(instrument);
+        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS;
+        skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain);
+        if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
+        lastUsedInstrumentIndex = instrumentIndex;
+    }
+
     private void onBossDefeated(){
-        // 清除当前所有特效慢慢淡出
-        comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false;
-        // 选择继续或退出
+        comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false; bossSkill = BossSkillType.NONE; reflectActive=false; absorbAccum=0;
         String msg = "击败Boss: " + boss.getName() + "\n当前总分: " + totalScore + "\n是否继续下一个Boss?";
         int option = JOptionPane.showOptionDialog(this, msg, "Boss 击败", JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE, null, new Object[]{"下一关","退出"}, "下一关");
         if (option == JOptionPane.YES_OPTION) {
             currentBossIndex++;
             if (currentBossIndex < bosses.size()) {
                 boss = bosses.get(currentBossIndex);
-                activeEffects.clear();
-                darkAlpha = 0f; slowFactor = 1.0; shakeIntensity = 0; bassPulseAmp = 0;
+                activeEffects.clear(); darkAlpha = 0f; slowFactor = 1.0; shakeIntensity = 0; bassPulseAmp = 0; scheduleNextBossSkill();
+                gamePanel.requestFocusInWindow();
             } else {
-                JOptionPane.showMessageDialog(this, "全��Boss已通关! 总分: " + totalScore);
-                audioEngine.shutdown();
-                System.exit(0);
+                JOptionPane.showMessageDialog(this, "全部Boss已通关! 总分: " + totalScore);
+                audioEngine.shutdown(); System.exit(0);
             }
-        } else {
-            audioEngine.shutdown(); System.exit(0);
-        }
+        } else { audioEngine.shutdown(); System.exit(0); }
     }
 
     private void spawnEffectForInstrument(Instrument instrument) {
@@ -328,20 +379,20 @@ public class CodeSymphonyGame extends JFrame {
     }
 
     private void startAnimationLoop() {
+        scheduleNextBossSkill();
         javax.swing.Timer timer = new javax.swing.Timer(16, e -> {
             long now = System.currentTimeMillis();
-            long dt = now - lastUpdate;
-            lastUpdate = now;
+            long dt = now - lastUpdate; lastUpdate = now;
             updateEffects(dt);
-            shakeIntensity *= 0.90;
-            if (shakeIntensity < 0.001) shakeIntensity = 0;
-            bassPulseAmp *= 0.92;
-            bassPulsePhase += dt / 1000.0 * 2 * Math.PI * 1.2;
+            shakeIntensity *= 0.90; if (shakeIntensity < 0.001) shakeIntensity = 0;
+            bassPulseAmp *= 0.92; bassPulsePhase += dt / 1000.0 * 2 * Math.PI * 1.2;
             boss.update(dt);
             updateBossPhaseIfNeeded();
             finishCounterIfTimeout();
+            updateBossSkillState();
             if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
             if (darkAlpha > 0f) darkAlpha *= 0.92f;
+            if (ultimateActive && now > ultimateEnd) ultimateActive = false;
             gamePanel.repaint();
         });
         timer.start();
@@ -476,10 +527,20 @@ public class CodeSymphonyGame extends JFrame {
             g2d.setColor(Color.WHITE);
             g2d.drawRoundRect(beatX, beatY, beatBarW, beatBarH, 8,8);
 
-            // 特效
+            // ���效
             synchronized (activeEffects) {
                 for (AttackEffect ef : activeEffects) { ef.draw(g2d); }
             }
+
+            // Boss技能状态提示
+            if (bossSkill != BossSkillType.NONE) {
+                String skillTxt = bossSkill==BossSkillType.ABSORB?"Boss吸收中": bossSkill==BossSkillType.REFLECT?"Boss反射中": "核心脉冲";
+                g2d.setColor(new Color(255,240,180));
+                g2d.drawString(skillTxt, getWidth()-180, 30);
+            }
+            // 显示BPM
+            g2d.setColor(Color.WHITE);
+            g2d.drawString("BPM:"+audioEngine.getBpm()+" ↑↓调整", getWidth()-170, getHeight()-30);
         }
     }
 

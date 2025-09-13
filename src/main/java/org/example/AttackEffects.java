@@ -172,4 +172,19 @@ public class AttackEffects {
             g2d.drawOval((int)(cx - r), (int)(cy - r), (int)(r*2), (int)(r*2));
         }
     }
+
+    /** Core脉冲特效 */
+    public static class CorePulseEffect extends AttackEffect {
+        private double r=10; private final int cx,cy; private final int maxR; private final Color c;
+        public CorePulseEffect(int w,int h,Color c){ this.cx=w/2; this.cy=h/3; this.maxR=(int)(Math.max(w,h)*0.9); this.c=c; }
+        @Override public void update(long dt){ r += dt*0.6; if(r>=maxR) alive=false; }
+        @Override public void draw(Graphics2D g){ float a=(float)(1-r/maxR); g.setColor(new Color(c.getRed(),c.getGreen(),c.getBlue(),(int)(a*200))); g.setStroke(new BasicStroke(10f)); g.drawOval((int)(cx-r),(int)(cy-r),(int)(r*2),(int)(r*2)); }
+    }
+    /** 终极技能覆盖特效 */
+    public static class UltimateOverlayEffect extends AttackEffect {
+        private long life=0; private final long maxLife=1800; private final Color base;
+        public UltimateOverlayEffect(Color base){ this.base=base; }
+        @Override public void update(long dt){ life+=dt; if(life>maxLife) alive=false; }
+        @Override public void draw(Graphics2D g){ float p = Math.min(1f, life/(float)maxLife); int alpha = (int)(255*(1-Math.abs(0.5f-p)*2)); g.setColor(new Color(base.getRed(),base.getGreen(),base.getBlue(), Math.min(200,alpha))); g.fillRect(0,0,g.getClipBounds().width,g.getClipBounds().height); }
+    }
 }

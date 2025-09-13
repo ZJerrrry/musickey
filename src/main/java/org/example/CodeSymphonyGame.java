@@ -138,20 +138,32 @@ public class CodeSymphonyGame extends JFrame {
     private boolean projectileUpdateToggle = false; // LOW 模式抛射物逻辑隔帧
     // ===========================
 
-    public CodeSymphonyGame() {
+    private JPanel rootPanel; // 新增：根容器（用于嵌入 ToolWindow）
+    private boolean embedded = false; // 是否嵌入模式（不显示为独立窗口）
+    private boolean paused = false; // 暂停状态
+    private javax.swing.Timer mainLoopTimer; // 保存主循环计时器
+
+    public CodeSymphonyGame() { this(false,false); }
+    public CodeSymphonyGame(boolean pluginMode) { this(pluginMode,false); }
+    public CodeSymphonyGame(boolean pluginMode, boolean embedded){
+        this.embedded = embedded;
         setTitle("音乐编程大作战 - 代码交响曲");
         setSize(WIDTH, HEIGHT);
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setResizable(false);
-
+        if(!embedded) {
+            setDefaultCloseOperation(pluginMode ? JFrame.DISPOSE_ON_CLOSE : JFrame.EXIT_ON_CLOSE);
+            setResizable(false);
+        }
         audioEngine = new AudioEngine();
         initGame();
         initUI();
         setupKeyBindings();
         startAnimationLoop();
-
-        setVisible(true);
+        if(!embedded){ setVisible(true); }
     }
+
+    public JPanel getRootPanel(){ return rootPanel; }
+    public boolean isPaused(){ return paused; }
+    public void togglePause(){ paused = !paused; if(audioEngine!=null) audioEngine.setPaused(paused); }
 
     private void initGame() {
         createBosses();
@@ -238,17 +250,22 @@ public class CodeSymphonyGame extends JFrame {
     }
 
     private void initUI() {
+        rootPanel = new JPanel(new BorderLayout());
         gamePanel = new GamePanel();
-        add(gamePanel, BorderLayout.CENTER);
-
-        JPanel controlPanel = new JPanel(new GridLayout(1, instruments.size()));
+        rootPanel.add(gamePanel, BorderLayout.CENTER);
+        int extra = 1; // 暂停按钮
+        JPanel controlPanel = new JPanel(new GridLayout(1, instruments.size()+extra));
         for (int i = 0; i < instruments.size(); i++) {
             final int idx = i;
             JButton button = new JButton(instruments.get(i).getName());
             button.addActionListener(e -> triggerInstrument(idx));
             controlPanel.add(button);
         }
-        add(controlPanel, BorderLayout.SOUTH);
+        JButton pauseBtn = new JButton("暂停(P)");
+        pauseBtn.addActionListener(e -> { togglePause(); pauseBtn.setText(paused?"继续(P)":"暂停(P)"); });
+        controlPanel.add(pauseBtn);
+        rootPanel.add(controlPanel, BorderLayout.SOUTH);
+        if(!embedded){ setContentPane(rootPanel); }
     }
 
     private void setupKeyBindings() {
@@ -273,6 +290,9 @@ public class CodeSymphonyGame extends JFrame {
         addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_DOWN,0), "BPM_DOWN", () -> changeBpm(-4));
         // F3 切换性能 HUD
         addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.VK_F3,0), "TOGGLE_DEBUG_HUD", () -> { showDebugHud = !showDebugHud; });
+        // 添加暂停键 P
+        addKeyBinding(gamePanel, KeyStroke.getKeyStroke('P'), "PAUSE_P", this::togglePause);
+        addKeyBinding(gamePanel, KeyStroke.getKeyStroke('p'), "PAUSE_p", this::togglePause);
 
         gamePanel.setFocusable(true);
         gamePanel.requestFocusInWindow();
@@ -287,7 +307,7 @@ public class CodeSymphonyGame extends JFrame {
         });
     }
 
-    // 动态重复间隔（减速后更长）
+    // 动态重复间隔（减速时更长）
     private int computeRepeatIntervalMs(){
         double base = 160;
         if (slowFactor < 1.0) return (int)(base / slowFactor);
@@ -458,8 +478,9 @@ public class CodeSymphonyGame extends JFrame {
 
     private void startAnimationLoop() {
         scheduleNextBossSkill();
-        javax.swing.Timer timer = new javax.swing.Timer(16, e -> {
+        mainLoopTimer = new javax.swing.Timer(16, e -> {
             long now = System.currentTimeMillis(); long dt = now - lastUpdate; lastUpdate = now; if(dt<=0) dt=1;
+            if(paused){ gamePanel.repaint(); return; }
             // 平滑帧时间
             avgFrameMs = avgFrameMs + (dt - avgFrameMs)*PERF_SMOOTH;
             adaptiveQuality(now);
@@ -477,59 +498,59 @@ public class CodeSymphonyGame extends JFrame {
             if(quality==QualityLevel.LOW){ frameSkipToggle = !frameSkipToggle; if(frameSkipToggle) return; }
             frameCounter++; gamePanel.repaint();
         });
-        timer.start();
+        mainLoopTimer.start();
     }
 
-    // === 新增：科技背景绘制方法 ===
-    private void drawTechBackground(Graphics2D g2d){
-        int w = getWidth(); int h = getHeight();
-        long t = System.currentTimeMillis();
-        // 背景渐变基底
-        GradientPaint gp = new GradientPaint(0,0,new Color(6,10,25),0,h,new Color(12,30,60));
-        g2d.setPaint(gp); g2d.fillRect(0,0,w,h);
-        // 低质量直接返回
-        if(quality==QualityLevel.LOW){ return; }
-        // 垂直律动光柱
-        for(int x=0;x<w;x+=60){
-            double pulse = 0.5 + 0.5*Math.sin(t/450.0 + x*0.12);
-            int a = (int)(40 + pulse*110);
-            g2d.setColor(new Color(0,170,255, Math.min(255,a)));
-            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.20f + (float)pulse*0.25f));
-            g2d.drawLine(x,0,x,h);
+    private void triggerInstrument(int instrumentIndex) {
+        if(paused) return; // 暂停时不触发
+        Instrument instrument = instruments.get(instrumentIndex); if (instrument == null) return;
+        if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
+        audioEngine.playHitNote(instrument); // 即时反馈
+        maybeActivateBossSkill();
+        long now = System.currentTimeMillis();
+        if (now - lastTriggerTime <= COMBO_WINDOW_MS) comboCount++; else comboCount = 1;
+        lastTriggerTime = now;
+        double comboBase = 1.0 + Math.min(1.5, comboCount * 0.05);
+        if (ultimateComboBoost && System.currentTimeMillis()<ultimateComboEnd) comboMultiplier = comboBase * 2.0; else { comboMultiplier = comboBase; if (ultimateComboBoost && System.currentTimeMillis()>=ultimateComboEnd) ultimateComboBoost=false; }
+        audioEngine.playPattern(instrument);
+        int baseDamage = instrument.getDamage(); int projectedDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
+        // 低质量模式下跳过一半投射物创建以降低 CPU / 绘制负载，仍然直接应用伤害
+        if(quality==QualityLevel.LOW && (lowQualityProjectileSkipCounter++ % 2)==1){
+            applyBossDamage(projectedDamage);
+            double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
+            if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
+            lastUsedInstrumentIndex = instrumentIndex; saveProgress(); return;
         }
-        // 扫描横条
-        int scanY = (int)((t/9) % h);
-        g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.55f));
-        g2d.setPaint(new GradientPaint(0,scanY,new Color(0,255,200,120),0, Math.min(h, scanY+90), new Color(0,255,200,0)));
-        g2d.fillRect(0, scanY, w, 90);
-        // 连接节点 (电路点)
-        g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.32f));
-        g2d.setColor(new Color(0,255,190,180));
-        int gapX = 120, gapY = 130;
-        for(int x=40;x<w;x+=gapX){
-            for(int y=60;y<h;y+=gapY){
-                if( ((x+y)>>6) % 3 == 0){
-                    int r = 4;
-                    g2d.fillOval(x-r,y-r,r*2,r*2);
-                    // 与邻点连线 (少量)
-                    if(x+gapX < w) g2d.drawLine(x,y,x+gapX,y);
-                    if(y+gapY < h) g2d.drawLine(x,y,x,y+gapY);
-                }
-            }
-        }
-        g2d.setComposite(AlphaComposite.SrcOver);
+        spawnProjectile(instrument, projectedDamage);
+        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
+        if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
+        lastUsedInstrumentIndex = instrumentIndex;
+        saveProgress();
     }
 
     private class GamePanel extends JPanel {
         public GamePanel(){ setBackground(Color.BLACK); setDoubleBuffered(true); }
         @Override protected void paintComponent(Graphics g){
-            super.paintComponent(g); Graphics2D g2d=(Graphics2D)g; g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            super.paintComponent(g);
+            // 新增暂停界面绘制
+            if(paused){
+                Graphics2D g2 = (Graphics2D)g;
+                g2.setColor(new Color(0,0,0,150));
+                g2.fillRect(0,0,getWidth(),getHeight());
+                g2.setFont(fontMono22Bold);
+                g2.setColor(Color.WHITE);
+                String msg = "PAUSED";
+                FontMetrics fm = g2.getFontMetrics();
+                g2.drawString(msg, getWidth()/2 - fm.stringWidth(msg)/2, getHeight()/2);
+                return; // 不绘制后续动态元素
+            }
+            Graphics2D g2d=(Graphics2D)g; g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             if(uiFont!=null) g2d.setFont(uiFont);
             // 新科技感背景
             if(quality==QualityLevel.LOW){
                 g2d.setColor(new Color(10,12,22)); g2d.fillRect(0,0,getWidth(),getHeight());
             } else {
-                drawTechBackground(g2d);
+                drawTechBackground(g2d); // 现在方法已在本内部类中定义
             }
             // 星点保留（叠加少量深空点）
             if(starX!=null && quality!=QualityLevel.LOW){ g2d.setColor(new Color(255,255,255,25)); for(int i=0;i<starX.length;i+=2){ g2d.fillRect(starX[i], starY[i], 2,2);} }
@@ -623,6 +644,35 @@ public class CodeSymphonyGame extends JFrame {
                 g2d.drawString("Q:"+quality+" FPSms:"+String.format("%.1f",avgFrameMs), 10, 18);
             }
         }
+
+        // === 新增：科技感背景绘制，修复缺失方法导致的编译错误 ===
+        private void drawTechBackground(Graphics2D g2d){
+            int w = getWidth(); int h = getHeight();
+            // 背景渐变
+            Paint old = g2d.getPaint();
+            GradientPaint gp = new GradientPaint(0,0,new Color(8,10,25), 0,h,new Color(18,22,40));
+            g2d.setPaint(gp); g2d.fillRect(0,0,w,h);
+            g2d.setPaint(old);
+            // 轻微网格
+            g2d.setColor(new Color(70,80,120,25));
+            int grid = 40; for(int x=0;x<w;x+=grid){ g2d.drawLine(x,0,x,h);} for(int y=0;y<h;y+=grid){ g2d.drawLine(0,y,w,y);}
+            // 动态扫描线
+            int scanH = 90; int yOff = (int)((System.currentTimeMillis()/12)% (h+scanH)) - scanH;
+            GradientPaint scan = new GradientPaint(0,yOff,new Color(120,160,255,0), 0,yOff+scanH/2,new Color(120,160,255,55), true);
+            g2d.setPaint(scan); g2d.fillRect(0,yOff,w,scanH); g2d.setPaint(old);
+            // 中央脉冲圈 (随 bpm 或低频脉冲)
+            float pulse = (float)(0.5 + 0.5*Math.sin(bassPulsePhase));
+            int r = (int)(Math.min(w,h)*0.22 * (1+0.05*pulse));
+            g2d.setStroke(new BasicStroke(2f));
+            g2d.setColor(new Color(140,120,255,70));
+            g2d.drawOval(w/2 - r, h/3 - r, r*2, r*2);
+            g2d.setColor(new Color(90,200,255,40));
+            g2d.drawOval(w/2 - (int)(r*1.35), h/3 - (int)(r*1.35), (int)(r*2.7), (int)(r*2.7));
+            // 轻微噪点星屑（复用 starX 如果已初始化）
+            if(starX==null) return; // 等待 addNotify 初始化
+            g2d.setColor(new Color(255,255,255,18));
+            for(int i=0;i<starX.length;i+=3){ int sx=starX[i]; int sy=starY[i]; if(sx<w && sy<h) g2d.fillRect(sx,sy,2,2);}
+        }
     }
 
     private void drawBossTentacles(Graphics2D g2d, int cx, int cy, int time){
@@ -644,6 +694,7 @@ public class CodeSymphonyGame extends JFrame {
     @Override
     public void dispose() {
         saveProgress();
+        if(mainLoopTimer!=null) mainLoopTimer.stop();
         super.dispose();
         audioEngine.shutdown();
     }
@@ -729,34 +780,9 @@ public class CodeSymphonyGame extends JFrame {
         }
     }
 
+    // 修正注释：重新补回缺失的核心方法
     private void damageFlashEdge(){ darkAlpha = 0.4f; }
 
-    private void triggerInstrument(int instrumentIndex) {
-        Instrument instrument = instruments.get(instrumentIndex); if (instrument == null) return;
-        if (slowFactor < 1.0 && System.currentTimeMillis() > slowEndTime) slowFactor = 1.0;
-        audioEngine.playHitNote(instrument); // 即时反馈
-        maybeActivateBossSkill();
-        long now = System.currentTimeMillis();
-        if (now - lastTriggerTime <= COMBO_WINDOW_MS) comboCount++; else comboCount = 1;
-        lastTriggerTime = now;
-        double comboBase = 1.0 + Math.min(1.5, comboCount * 0.05);
-        if (ultimateComboBoost && System.currentTimeMillis()<ultimateComboEnd) comboMultiplier = comboBase * 2.0; else { comboMultiplier = comboBase; if (ultimateComboBoost && System.currentTimeMillis()>=ultimateComboEnd) ultimateComboBoost=false; }
-        audioEngine.playPattern(instrument);
-        int baseDamage = instrument.getDamage(); int projectedDamage = (int)Math.round(baseDamage * comboMultiplier * slowFactor);
-        // 低质量模式下跳过一半投射物创建以降低 CPU / 绘制负载，仍然直接应用伤害
-        if(quality==QualityLevel.LOW && (lowQualityProjectileSkipCounter++ % 2)==1){
-            applyBossDamage(projectedDamage);
-            double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
-            if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
-            lastUsedInstrumentIndex = instrumentIndex; saveProgress(); return;
-        }
-        spawnProjectile(instrument, projectedDamage);
-        double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain * 0.4);
-        if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
-        lastUsedInstrumentIndex = instrumentIndex;
-        saveProgress();
-    }
-    // ====== 核心方法补齐结束 ======
 
     private void onBossDefeated(){
         int defeatedIndex = currentBossIndex; // 当前被打败的索引
@@ -766,14 +792,14 @@ public class CodeSymphonyGame extends JFrame {
             int opt = JOptionPane.showOptionDialog(this, "已击败第一个Boss，是否继续挑战下一个?", "进度",
                     JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE, null,
                     new Object[]{"继续", "退出"}, "继续");
-            if(opt!=0){ dispose(); System.exit(0); return; }
+            if(opt!=0){ dispose(); if(!embedded) System.exit(0); return; }
         }
         // 第二到第三前提示 (打败第二个: defeatedIndex==1)
         if(defeatedIndex==1 && currentBossIndex < bosses.size()){
             int opt = JOptionPane.showOptionDialog(this, "已击败第二个Boss，是否继续挑战最终Boss?", "进度",
                     JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE, null,
                     new Object[]{"继续", "退出"}, "继续");
-            if(opt!=0){ dispose(); System.exit(0); return; }
+            if(opt!=0){ dispose(); if(!embedded) System.exit(0); return; }
         }
         if(currentBossIndex >= bosses.size()){
             // 全部击败
@@ -781,7 +807,7 @@ public class CodeSymphonyGame extends JFrame {
                     JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE, null,
                     new Object[]{"重新开始","退出"}, "重新开始");
             if(opt==0){ restartGame(); return; }
-            dispose(); System.exit(0); return;
+            dispose(); if(!embedded) System.exit(0); return;
         }
         boss = bosses.get(currentBossIndex);
         comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false;

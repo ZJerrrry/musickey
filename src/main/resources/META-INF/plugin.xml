@@ -1,0 +1,23 @@
+<idea-plugin>
+    <id>org.example.codesymphony</id>
+    <name>代码交响曲游戏</name>
+    <vendor email="" url="">CodeSymphony</vendor>
+    <description><![CDATA[
+        将当前 Swing 版“音乐编程大作战 - 代码交响曲”嵌入到 IntelliJ IDEA。<br/>
+        在 Tools 菜单中添加一个入口来启动游戏窗口，同时提供右侧工具窗口形式嵌入。<br/>
+        新增：暂��功能 (P)。
+    ]]></description>
+
+    <actions>
+        <action id="org.example.StartCodeSymphonyGameAction"
+                class="org.example.StartCodeSymphonyGameAction"
+                text="启动代码交响曲 (独立窗口)"
+                description="打开音乐编程大作战窗口">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Code Symphony" factoryClass="org.example.CodeSymphonyToolWindowFactory" anchor="right" canCloseContent="true" />
+    </extensions>
+</idea-plugin>

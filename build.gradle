@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id 'application'
+    id 'org.jetbrains.intellij' version '1.17.3'
 }
 
 group = 'org.example'
@@ -8,6 +9,19 @@ version = '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
+}
+
+intellij {
+    // 使用与本地 IDE 接近的版本，可根据需要调整
+    version = '2024.1'
+    type = 'IC' // 社区版
+    plugins = []
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
 }
 
 dependencies {
@@ -18,6 +32,12 @@ dependencies {
 
 application {
     mainClass = 'org.example.Main'
+}
+
+// Patch 插件描述中的版本号
+patchPluginXml {
+    sinceBuild = '241'
+    untilBuild = ''
 }
 
 test {

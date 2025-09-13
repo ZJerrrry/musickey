@@ -38,6 +38,7 @@ public class AudioEngine {
     private int[] dropBassPattern = {36,36,36,38, 36,36,41,43};
 
     private Thread bgThread; // optimized background melody loop thread
+    private volatile boolean paused = false; // 新增：整体暂停标志
 
     public AudioEngine() {
         try {
@@ -102,16 +103,17 @@ public class AudioEngine {
         bgThread.start();
     }
     public void stopBackgroundMelody(){ bgRunning=false; }
+    public void setPaused(boolean p){ this.paused = p; }
 
     private void loopMainMelody(){
         if(!bgRunning || channels==null) return;
         try {
             waitForNextBeat();
-            // 每4拍为一小节
+            if(paused){ return; }
             long currentBeat = currentBeat();
             boolean newBar = (currentBeat % 4)==0;
             if(newBar) barCounter++;
-            int section = (int)((barCounter / SECTION_LENGTH_BARS) % TOTAL_SECTIONS); // 0:A 1:B 2:C
+            int section = (int)((barCounter / SECTION_LENGTH_BARS) % TOTAL_SECTIONS);
             switch(section){
                 case 0 -> playSectionA(currentBeat);
                 case 1 -> playSectionB(currentBeat);
@@ -199,7 +201,7 @@ public class AudioEngine {
 
     public void playPattern(Instrument instrument) {
         if (channels == null) return;
-        // 玩家触发统一为两拍低音 / 鼓点
+        // 玩家触发统一为两拍低音 / 鼔点
         patternPool.submit(() -> {
             try {
                 waitForNextBeat();

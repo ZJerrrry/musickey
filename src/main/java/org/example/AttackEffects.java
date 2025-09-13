@@ -100,5 +100,76 @@ public class AttackEffects {
             g2d.setPaint(old);
         }
     }
-}
 
+    /** 超级烟花特效 */
+    public static class SuperFireworkEffect extends AttackEffect {
+        private final List<FireworkEffect> bursts = new ArrayList<>();
+        private long elapsed = 0;
+        private final int durationMs = 1600;
+        private final Random r = new Random();
+        private final int w, h;
+        private final Color base;
+        public SuperFireworkEffect(int w, int h, Color base){
+            this.w = w; this.h = h; this.base = base;
+            // 初始三组
+            for(int i=0;i<3;i++) bursts.add(new FireworkEffect(r.nextInt(w), r.nextInt(h/2)+h/8, base));
+        }
+        @Override public void update(long dt){
+            elapsed += dt;
+            if (elapsed < durationMs) {
+                if (r.nextDouble() < 0.18) {
+                    bursts.add(new FireworkEffect(r.nextInt(w), r.nextInt(h/2)+h/8, base));
+                }
+            }
+            Iterator<FireworkEffect> it = bursts.iterator();
+            while(it.hasNext()){
+                FireworkEffect f = it.next();
+                f.update(dt);
+                if(!f.isAlive()) it.remove();
+            }
+            if (elapsed >= durationMs && bursts.isEmpty()) alive = false;
+        }
+        @Override public void draw(Graphics2D g2d){
+            for(FireworkEffect f: bursts) f.draw(g2d);
+        }
+    }
+
+    /** 全屏波纹特效 */
+    public static class FullScreenRippleEffect extends AttackEffect {
+        private final int cx, cy, maxR;
+        private double r = 10;
+        private final Color base;
+        public FullScreenRippleEffect(int width, int height, Color base){
+            this.cx = width/2; this.cy = height/2; this.maxR = (int)(Math.hypot(width, height)/1.2); this.base = base;
+        }
+        @Override public void update(long dt){
+            r += dt * 0.55; // 更快扩散
+            if (r >= maxR) alive = false;
+        }
+        @Override public void draw(Graphics2D g2d){
+            float alpha = (float)(1 - r / maxR);
+            alpha = Math.max(0, alpha);
+            g2d.setStroke(new BasicStroke(6f));
+            g2d.setColor(new Color(base.getRed(), base.getGreen(), base.getBlue(), (int)(alpha*200)));
+            g2d.drawOval((int)(cx - r), (int)(cy - r), (int)(r*2), (int)(r*2));
+        }
+    }
+
+    /** 反击冲击波特效 */
+    public static class ShockwaveEffect extends AttackEffect {
+        private final int cx, cy; private double r=5; private final int maxR; private double thickness=22;
+        public ShockwaveEffect(int width, int height){
+            this.cx = width/2; this.cy = height/3; this.maxR = (int)Math.max(width, height)*3/4;
+        }
+        @Override public void update(long dt){
+            r += dt * 0.7; thickness = Math.max(2, thickness - dt*0.03);
+            if (r >= maxR) alive = false;
+        }
+        @Override public void draw(Graphics2D g2d){
+            float alpha = (float)(1 - r/maxR);
+            g2d.setStroke(new BasicStroke((float)thickness));
+            g2d.setColor(new Color(255,80,80,(int)(alpha*180)));
+            g2d.drawOval((int)(cx - r), (int)(cy - r), (int)(r*2), (int)(r*2));
+        }
+    }
+}

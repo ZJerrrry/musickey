@@ -6,7 +6,7 @@ import java.util.Arrays;
 import java.util.Random;
 
 // Boss类 (代码人形)
-public class BugBoss {
+public class BugBoss implements BossEntity {
     private int health;
     private final int maxHealth;
     private String name;

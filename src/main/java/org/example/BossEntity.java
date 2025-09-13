@@ -9,5 +9,5 @@ public interface BossEntity {
     int getHealth();
     int getMaxHealth();
     String getName();
+    void setHealth(int hp); // 新增用于存档恢复
 }
-

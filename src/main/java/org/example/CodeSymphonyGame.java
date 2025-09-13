@@ -92,6 +92,9 @@ public class CodeSymphonyGame extends JFrame {
     private boolean telegraphSatisfied = false;
     private String telegraphKey = "SPACE";
 
+    // 当前存档数据引用
+    private SaveManager.SaveData saveData;
+
     public CodeSymphonyGame() {
         setTitle("音乐编程大作战 - 代码交响曲");
         setSize(WIDTH, HEIGHT);
@@ -109,7 +112,24 @@ public class CodeSymphonyGame extends JFrame {
 
     private void initGame() {
         createBosses();
-        boss = bosses.get(0);
+        double[] maxHealths = bosses.stream().mapToDouble(BossEntity::getMaxHealth).toArray();
+        SaveManager.SaveData loaded = SaveManager.load(bosses.size(), maxHealths);
+        if (loaded != null) {
+            this.saveData = loaded;
+            currentBossIndex = loaded.currentBossIndex;
+        }
+        boss = bosses.get(currentBossIndex);
+        if (loaded != null && loaded.bossHealths != null && currentBossIndex < loaded.bossHealths.length) {
+            boss.setHealth((int)loaded.bossHealths[currentBossIndex]);
+            totalScore = loaded.totalScore;
+            audioEngine.setBpm(loaded.bpm);
+            skillCharge = loaded.skillCharge;
+            comboCount = loaded.comboCount;
+            if (loaded.ultimateComboRemainMs > 0) {
+                ultimateComboBoost = true;
+                ultimateComboEnd = System.currentTimeMillis() + loaded.ultimateComboRemainMs;
+            }
+        }
         instruments = new LinkedHashMap<>();
         instruments.put(0, new Instrument("循环鼓 (A)", 10000, "鼓", 9, 0, Instrument.EffectType.RIPPLE));
         instruments.put(1, new Instrument("函数琴 (S)", 16000, "钢琴", 0, 0, Instrument.EffectType.FIREWORK));
@@ -290,21 +310,25 @@ public class CodeSymphonyGame extends JFrame {
 
     private void spawnTelegraph(String key, long duration){
         telegraphKey = key; telegraphSatisfied=false;
-        pendingTelegraph = new AttackEffects.CircleTelegraphEffect(getWidth()/2, getHeight()/3, 260, duration, key);
-        synchronized (activeEffects){ activeEffects.add(pendingTelegraph); }
+        // 用新的EdgeThreatEffect替换
+        pendingTelegraph = null;
+        synchronized (activeEffects){ activeEffects.add(new AttackEffects.EdgeThreatEffect(duration, key)); }
     }
 
     private void updateBossSkillState(){
         long now = System.currentTimeMillis();
         if (bossSkill != BossSkillType.NONE && now > bossSkillEnd){
             if (bossSkill == BossSkillType.ABSORB && absorbAccum > 0){
-                // 吸收结束爆炸：造成小范围视觉与回血效果已处理，新增爆炸特效
-                synchronized (activeEffects){ activeEffects.add(new AttackEffects.FullScreenRippleEffect(getWidth(), getHeight(), new Color(255,140,90))); }
-                // 吸收回血逻辑
+                // 多层HealingBurst
+                synchronized (activeEffects){
+                    activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,140,90), 0.35, 1200));
+                    activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,200,140), 0.5, 900));
+                    activeEffects.add(new AttackEffects.HealingBurstEffect(getWidth(), getHeight(), new Color(255,255,200), 0.7, 700));
+                }
                 boss.takeDamage(-(int)Math.min(boss.getMaxHealth()*0.01, absorbAccum*0.5));
             }
             if (bossSkill == BossSkillType.REFLECT){ reflectActive = false; }
-            bossSkill = BossSkillType.NONE; if(pendingTelegraph!=null) pendingTelegraph.alive=false; scheduleNextBossSkill();
+            bossSkill = BossSkillType.NONE; scheduleNextBossSkill(); saveProgress();
         }
     }
 
@@ -334,9 +358,11 @@ public class CodeSymphonyGame extends JFrame {
         double gain = SKILL_GAIN_PER_HIT + comboCount * SKILL_COMBO_BONUS; skillCharge = Math.min(SKILL_THRESHOLD, skillCharge + gain);
         if (skillCharge >= SKILL_THRESHOLD) skillReady = true;
         lastUsedInstrumentIndex = instrumentIndex;
+        saveProgress();
     }
 
     private void onBossDefeated(){
+        saveProgress();
         comboCount = 0; comboMultiplier = 1.0; skillCharge = 0; skillReady = false; bossSkill = BossSkillType.NONE; reflectActive=false; absorbAccum=0;
         String msg = "击败Boss: " + boss.getName() + "\n当前总分: " + totalScore + "\n是否继续下一个Boss?";
         int option = JOptionPane.showOptionDialog(this, msg, "Boss 击败", JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE, null, new Object[]{"下一关","退出"}, "下一关");
@@ -345,12 +371,14 @@ public class CodeSymphonyGame extends JFrame {
             if (currentBossIndex < bosses.size()) {
                 boss = bosses.get(currentBossIndex);
                 activeEffects.clear(); darkAlpha = 0f; slowFactor = 1.0; shakeIntensity = 0; bassPulseAmp = 0; scheduleNextBossSkill();
+                saveProgress();
                 gamePanel.requestFocusInWindow();
             } else {
-                JOptionPane.showMessageDialog(this, "全部Boss已通关! 总分: " + totalScore);
+                JOptionPane.showMessageDialog(this, "全部Boss已通关! 总分: " + totalScore + "\n已自动保存。");
+                saveProgress();
                 audioEngine.shutdown(); System.exit(0);
             }
-        } else { audioEngine.shutdown(); System.exit(0); }
+        } else { saveProgress(); audioEngine.shutdown(); System.exit(0); }
     }
 
     private void spawnEffectForInstrument(Instrument instrument) {
@@ -546,8 +574,22 @@ public class CodeSymphonyGame extends JFrame {
         }
     }
 
+    private void saveProgress() {
+        SaveManager.SaveData d = new SaveManager.SaveData();
+        d.currentBossIndex = currentBossIndex;
+        d.totalScore = totalScore;
+        d.bpm = audioEngine.getBpm();
+        d.skillCharge = skillCharge;
+        d.comboCount = comboCount;
+        d.ultimateComboRemainMs = ultimateComboBoost ? Math.max(0, ultimateComboEnd - System.currentTimeMillis()) : 0;
+        d.bossHealths = bosses.stream().mapToDouble(BossEntity::getHealth).toArray();
+        SaveManager.save(d);
+        this.saveData = d;
+    }
+
     @Override
     public void dispose() {
+        saveProgress();
         super.dispose();
         audioEngine.shutdown();
     }

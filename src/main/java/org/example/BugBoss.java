@@ -41,6 +41,8 @@ public class BugBoss implements BossEntity {
         if (health < 0) health = 0;
     }
 
+    public void setHealth(int hp){ this.health = Math.max(0, Math.min(hp, maxHealth)); }
+
     public void draw(Graphics2D g2d, int centerX, int centerY) {
         double hpPct = (double)health / maxHealth;
         g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);

@@ -21,6 +21,10 @@ public class AudioEngine {
     private final ScheduledExecutorService bgMelodyExec = Executors.newSingleThreadScheduledExecutor();
     private volatile boolean bgRunning = false;
     private final int BG_CHANNEL = 5; // 预留后台主旋律通道
+    private volatile int bgSectionIndex = 0;
+    private final int[][] PAD_CHORDS = { {48,52,55,59}, {50,53,57,60}, {52,55,59,62}, {47,50,53,57} }; // 简单进行
+    private final int[][] ARP_NOTES = { {72,76,79,83}, {74,77,81,84}, {76,79,83,86}, {71,74,77,81} };
+    private final int[][] COUNTER_LINE = { {84,83,81,79}, {83,81,79,76}, {86,84,83,81}, {83,81,79,76} };
 
     public AudioEngine() {
         try {
@@ -28,7 +32,7 @@ public class AudioEngine {
             synthesizer.open();
             channels = synthesizer.getChannels();
         } catch (MidiUnavailableException e) {
-            LOGGER.log(Level.SEVERE, "无法初始化合成器", e);
+            LOGGER.log(Level.SEVERE, "无法初始化���成器", e);
         }
         setBpm(bpm);
         startBeatClock();
@@ -80,16 +84,31 @@ public class AudioEngine {
         if(!bgRunning || channels==null) return;
         try {
             waitForNextBeat();
-            // 使用 main melody 片段
-            int[][] phrase = {
-                    {72,100},{74,100},{76,100},{79,110},
-                    {76,100},{74,100},{72,100},{67,90},
-                    {69,100},{72,108},{74,108},{72,100},
-                    {67,95},{69,100},{67,90},{64,85}
-            };
-            long step = beatLengthMs/4;
-            MidiChannel ch = channels[BG_CHANNEL];
-            for(int[] n: phrase){ if(!bgRunning) break; ch.noteOn(n[0], n[1]); Thread.sleep(step); ch.noteOff(n[0]); }
+            int sec = bgSectionIndex % PAD_CHORDS.length;
+            long step16 = beatLengthMs/4; // 16分
+            MidiChannel padCh = channels[BG_CHANNEL];
+            MidiChannel arpCh = channels[ (BG_CHANNEL+1) % channels.length];
+            MidiChannel counterCh = channels[ (BG_CHANNEL+2) % channels.length];
+            try { padCh.programChange(91); arpCh.programChange(0); counterCh.programChange(40);} catch(Exception ignored){}
+            // Pad 按住两拍
+            for(int n: PAD_CHORDS[sec]) padCh.noteOn(n,70);
+            // Arp 8 个16分 = 2拍
+            for(int i=0;i<8;i++){
+                int note = ARP_NOTES[sec][i % ARP_NOTES[sec].length];
+                arpCh.noteOn(note, 90);
+                Thread.sleep(step16);
+                arpCh.noteOff(note);
+            }
+            // Counter phrase（再两拍）
+            for(int n: PAD_CHORDS[sec]) padCh.noteOn(n,60); // 重新轻按保证持续
+            for(int i=0;i<8;i++){
+                int note = COUNTER_LINE[sec][i % COUNTER_LINE[sec].length];
+                counterCh.noteOn(note,85);
+                Thread.sleep(step16);
+                counterCh.noteOff(note);
+            }
+            for(int n: PAD_CHORDS[sec]) padCh.noteOff(n);
+            bgSectionIndex++;
         } catch (InterruptedException ignored) {}
     }
 
@@ -97,7 +116,7 @@ public class AudioEngine {
 
     public void playPattern(Instrument instrument) {
         if (channels == null) return;
-        // 玩家触发统一为两拍低音/节奏
+        // 玩家触发统一为两拍低音/节��
         patternPool.submit(() -> {
             try {
                 waitForNextBeat();
@@ -135,25 +154,32 @@ public class AudioEngine {
         patternPool.submit(() -> {
             try {
                 waitForNextBeat();
-                long end = System.currentTimeMillis() + 5000; // 至少5秒
-                MidiChannel lead = channels[0];
-                MidiChannel guitar = channels[2];
+                long total = 5000; // 5秒总时长
+                long prelude = 1800; // 前奏
+                long start = System.currentTimeMillis();
                 MidiChannel bass = channels[3];
-                try { lead.programChange(30); guitar.programChange(29); bass.programChange(33);} catch(Exception ignored){}
-                int[] powerChord = {52,59,64};
-                for(int n: powerChord) guitar.noteOn(n,120);
-                bass.noteOn(40,120);
-                long step = beatLengthMs/8;
-                int note = 72;
-                while(System.currentTimeMillis()<end){
-                    lead.noteOn(note, 127);
-                    Thread.sleep(step);
-                    lead.noteOff(note);
-                    note += (Math.random()>0.6?2:1);
-                    if (note>84) note=72+(int)(Math.random()*4);
+                try { bass.programChange(33);} catch(Exception ignored){}
+                int[] scale = {40,43,45,47,48,50,52,55};
+                // 前奏：低频间隔脉冲
+                while(System.currentTimeMillis()-start < prelude){
+                    for(int n: new int[]{scale[0], scale[3]}){ bass.noteOn(n,110); }
+                    Thread.sleep(beatLengthMs/2);
+                    for(int n: new int[]{scale[0], scale[3]}){ bass.noteOff(n); }
+                    bass.noteOn(scale[2],100);
+                    Thread.sleep(beatLengthMs/2);
+                    bass.noteOff(scale[2]);
                 }
-                for(int n: powerChord) guitar.noteOff(n);
-                bass.noteOff(40);
+                // 爆发阶段：快速上行/下行滑音
+                long burstEnd = start + total;
+                int idx = 0; boolean up = true;
+                long step = Math.max(40, beatLengthMs/8);
+                while(System.currentTimeMillis()<burstEnd){
+                    int note = scale[idx];
+                    bass.noteOn(note, 127);
+                    Thread.sleep(step);
+                    bass.noteOff(note);
+                    if(up){ idx++; if(idx>=scale.length){ idx=scale.length-2; up=false;} } else { idx--; if(idx<0){ idx=1; up=true;} }
+                }
             } catch (InterruptedException ignored) {}
         });
     }

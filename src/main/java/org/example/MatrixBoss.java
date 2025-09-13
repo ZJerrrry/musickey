@@ -18,6 +18,7 @@ public class MatrixBoss implements BossEntity {
 
     public void update(long dt){ timeMs += dt; }
     public void takeDamage(int dmg){ health = Math.max(0, health - dmg); }
+    public void setHealth(int hp){ this.health = Math.max(0, Math.min(hp, maxHealth)); }
     public int getHealth(){ return health; }
     public int getMaxHealth(){ return maxHealth; }
     public String getName(){ return name; }

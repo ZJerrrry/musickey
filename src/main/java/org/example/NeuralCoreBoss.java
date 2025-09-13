@@ -8,6 +8,7 @@ public class NeuralCoreBoss implements BossEntity {
     public NeuralCoreBoss(int hp,String name){ this.health=hp; this.maxHealth=hp; this.name=name; }
     public void update(long dt){ t+=dt; }
     public void takeDamage(int dmg){ health=Math.max(0, health-dmg); }
+    public void setHealth(int hp){ this.health = Math.max(0, Math.min(hp, maxHealth)); }
     public int getHealth(){ return health; }
     public int getMaxHealth(){ return maxHealth; }
     public String getName(){ return name; }
@@ -51,4 +52,3 @@ public class NeuralCoreBoss implements BossEntity {
         g.drawString("NEURAL CORE", cx-90, cy - radius/2 - 20);
     }
 }
-

@@ -209,4 +209,30 @@ public class AttackEffects {
         @Override public void update(long dt){ life+=dt; if(life>maxLife) alive=false; }
         @Override public void draw(Graphics2D g){ double p = Math.min(1.0, life/(double)maxLife); int r = (int)(startR*(1-p)); g.setColor(new Color(255,200,80,160)); g.setStroke(new BasicStroke(4f)); g.drawOval(cx-r, cy-r, r*2, r*2); g.setFont(new Font("Monospaced", Font.BOLD, 28)); g.drawString(key, cx- (key.length()*14/2), cy+10); }
     }
+    public static class EdgeThreatEffect extends AttackEffect {
+        private long life=0; private final long duration; private final String key; private final Color color = new Color(255,40,40);
+        public EdgeThreatEffect(long durationMs,String key){ this.duration=durationMs; this.key=key; }
+        @Override public void update(long dt){ life+=dt; if(life>duration) alive=false; }
+        @Override public void draw(Graphics2D g){ int w=g.getClipBounds().width; int h=g.getClipBounds().height; double p=Math.min(1d, life/(double)duration); int inset=(int)(Math.min(w,h)*0.5*p); int alpha=(int)(180*(1-p)); if(alpha<0)alpha=0; // 四周向中心收缩
+            g.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), alpha));
+            // 上
+            g.fillRect(0,0,w,inset/2);
+            // 下
+            g.fillRect(0,h-inset/2,w,inset/2);
+            // 左
+            g.fillRect(0,0,inset/2,h);
+            // 右
+            g.fillRect(w-inset/2,0,inset/2,h);
+            // 中心提示
+            g.setFont(new Font("Monospaced", Font.BOLD, 42));
+            int tw = g.getFontMetrics().stringWidth(key);
+            g.drawString(key, w/2 - tw/2, h/3 + 40);
+        }
+    }
+    public static class HealingBurstEffect extends AttackEffect {
+        private final int cx,cy; private double r=10; private final int maxR; private final Color base; private final double speed; private long life=0; private final long maxLife;
+        public HealingBurstEffect(int w,int h, Color base, double speed, long maxLife){ this.cx=w/2; this.cy=h/3; this.maxR=(int)(Math.max(w,h)*0.9); this.base=base; this.speed=speed; this.maxLife=maxLife; }
+        @Override public void update(long dt){ life+=dt; r += dt*speed; if(life>maxLife) alive=false; }
+        @Override public void draw(Graphics2D g){ float a = (float)(1 - life/(float)maxLife); if(a<0)a=0; g.setColor(new Color(base.getRed(), base.getGreen(), base.getBlue(), (int)(a*180))); g.setStroke(new BasicStroke(6f)); g.drawOval((int)(cx-r),(int)(cy-r),(int)(r*2),(int)(r*2)); }
+    }
 }

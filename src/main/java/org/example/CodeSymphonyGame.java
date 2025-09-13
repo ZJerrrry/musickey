@@ -3,6 +3,7 @@ package org.example;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -26,6 +27,22 @@ public class CodeSymphonyGame extends JFrame {
 
     private final List<AttackEffect> activeEffects = new ArrayList<>();
     private long lastUpdate = System.currentTimeMillis();
+
+    // 新增连击&特效字段
+    private int comboCount = 0;
+    private long lastTriggerTime = 0;
+    private static final long COMBO_WINDOW_MS = 800; // 连击时间窗口
+    private double comboMultiplier = 1.0;
+
+    // 自动连击：按住键重复��发
+    private final Map<Integer, javax.swing.Timer> holdTimers = new LinkedHashMap<>();
+    private final Map<Integer, Boolean> keyHolding = new LinkedHashMap<>();
+
+    // 屏幕抖动 & 低频光晕
+    private double shakeIntensity = 0; // 0~1
+    private double bassPulseAmp = 0;   // 低频脉冲幅度
+    private double bassPulsePhase = 0; // 相位
+    private final Random randFX = new Random();
 
     public CodeSymphonyGame() {
         setTitle("音乐编程大作战 - 代码交响曲");
@@ -70,13 +87,16 @@ public class CodeSymphonyGame extends JFrame {
     }
 
     private void setupKeyBindings() {
-        // 键位：A S D F G
         char[] keys = {'A','S','D','F','G'};
         for (int i = 0; i < instruments.size(); i++) {
             final int idx = i;
             char key = keys[i];
-            addKeyBinding(gamePanel, KeyStroke.getKeyStroke(key), "PLAY_"+key, () -> triggerInstrument(idx));
-            addKeyBinding(gamePanel, KeyStroke.getKeyStroke(Character.toLowerCase(key), 0), "PLAY_LOW_"+key, () -> triggerInstrument(idx));
+            // 按下（触发 + 启动长按计时器）
+            addKeyBinding(gamePanel, KeyStroke.getKeyStroke(key, 0, false), "PRESS_"+key, () -> handlePress(idx));
+            addKeyBinding(gamePanel, KeyStroke.getKeyStroke(Character.toLowerCase(key), 0, false), "PRESS_LOW_"+key, () -> handlePress(idx));
+            // 释放（停止长按）
+            addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.getExtendedKeyCodeForChar(key), 0, true), "RELEASE_"+key, () -> handleRelease(idx));
+            addKeyBinding(gamePanel, KeyStroke.getKeyStroke(KeyEvent.getExtendedKeyCodeForChar(Character.toLowerCase(key)), 0, true), "RELEASE_LOW_"+key, () -> handleRelease(idx));
         }
         gamePanel.setFocusable(true);
         gamePanel.requestFocusInWindow();
@@ -91,24 +111,62 @@ public class CodeSymphonyGame extends JFrame {
         });
     }
 
+    private void handlePress(int idx){
+        keyHolding.put(idx, true);
+        triggerInstrument(idx);
+        // 启动自动连击（延迟后每隔一定时间触发）
+        javax.swing.Timer t = new javax.swing.Timer(160, e -> {
+            if(Boolean.TRUE.equals(keyHolding.get(idx))) {
+                triggerInstrument(idx);
+            }
+        });
+        t.setInitialDelay(260); // 首次按住延迟
+        t.start();
+        holdTimers.put(idx, t);
+    }
+
+    private void handleRelease(int idx){
+        keyHolding.put(idx, false);
+        javax.swing.Timer t = holdTimers.remove(idx);
+        if (t != null) t.stop();
+    }
+
     private void triggerInstrument(int instrumentIndex) {
         Instrument instrument = instruments.get(instrumentIndex);
         if (instrument == null) return;
+
+        long now = System.currentTimeMillis();
+        if (now - lastTriggerTime <= COMBO_WINDOW_MS) {
+            comboCount++;
+        } else {
+            comboCount = 1;
+        }
+        lastTriggerTime = now;
+        comboMultiplier = 1.0 + Math.min(1.5, comboCount * 0.05); // 最高+150%
 
         // 播放音频模式
         audioEngine.playPattern(instrument);
 
         // 造成伤害
-        int damage = instrument.getDamage();
-        boss.takeDamage(damage);
-        score += damage;
+        int baseDamage = instrument.getDamage();
+        int finalDamage = (int)Math.round(baseDamage * comboMultiplier);
+        boss.takeDamage(finalDamage);
+        score += finalDamage;
+
+        // 抖动提升（与伤害相关）
+        shakeIntensity = Math.min(1.0, shakeIntensity + finalDamage / 5000.0);
+
+        // 鼓/贝斯驱动低频脉冲
+        if (instrument.getSoundType().contains("鼓") || instrument.getSoundType().contains("贝斯")) {
+            bassPulseAmp = Math.min(1.0, bassPulseAmp + 0.35);
+        }
 
         // 生成特效
         spawnEffectForInstrument(instrument);
 
         // 检查结束
         if (boss.getHealth() <= 0) {
-            JOptionPane.showMessageDialog(this, "你净化了 code!\n总分: " + score);
+            JOptionPane.showMessageDialog(this, "你净化了 code!\n总分: " + score + "\n最高连击: " + comboCount);
             audioEngine.shutdown();
             System.exit(0);
         }
@@ -140,6 +198,12 @@ public class CodeSymphonyGame extends JFrame {
             long dt = now - lastUpdate;
             lastUpdate = now;
             updateEffects(dt);
+            // 衰减抖动与低频脉冲
+            shakeIntensity *= 0.90;
+            if (shakeIntensity < 0.001) shakeIntensity = 0;
+            bassPulseAmp *= 0.92;
+            bassPulsePhase += dt / 1000.0 * 2 * Math.PI * 1.2; // 低频 ~1.2Hz
+            boss.update(dt);
             gamePanel.repaint();
         });
         timer.start();
@@ -167,12 +231,24 @@ public class CodeSymphonyGame extends JFrame {
             Graphics2D g2d = (Graphics2D) g;
             g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-            // 背景渐变
+            // 背景
             Paint old = g2d.getPaint();
             GradientPaint bg = new GradientPaint(0,0,new Color(10,10,25),0,getHeight(),new Color(30,0,50));
-            g2d.setPaint(bg);
-            g2d.fillRect(0,0,getWidth(),getHeight());
-            g2d.setPaint(old);
+            g2d.setPaint(bg); g2d.fillRect(0,0,getWidth(),getHeight()); g2d.setPaint(old);
+
+            // 低频光晕 (全屏中心渐变叠加)
+            if (bassPulseAmp > 0.02) {
+                float pulse = (float)(bassPulseAmp * (0.6 + 0.4 * Math.sin(bassPulsePhase)));
+                int radius = (int)(Math.min(getWidth(), getHeight()) * (0.45 + 0.15 * pulse));
+                RadialGradientPaint glow = new RadialGradientPaint(new Point(getWidth()/2, getHeight()/2), radius,
+                        new float[]{0f,0.6f,1f}, new Color[]{
+                                new Color(120,40,180,(int)(120*pulse)),
+                                new Color(80,0,100,(int)(60*pulse)),
+                                new Color(30,0,50,0)});
+                g2d.setPaint(glow);
+                g2d.fillOval(getWidth()/2 - radius, getHeight()/2 - radius, radius*2, radius*2);
+                g2d.setPaint(old);
+            }
 
             // 星点
             g2d.setColor(new Color(255,255,255,40));
@@ -182,34 +258,47 @@ public class CodeSymphonyGame extends JFrame {
                 g2d.fillRect(sx, sy, 2,2);
             }
 
+            // 计算抖动偏移
+            int shakeX = 0, shakeY = 0;
+            if (shakeIntensity > 0) {
+                double mag = shakeIntensity * 12.0;
+                shakeX = (int)((randFX.nextDouble()-0.5)*mag*2);
+                shakeY = (int)((randFX.nextDouble()-0.5)*mag*2);
+            }
+            g2d.translate(shakeX, shakeY);
+
             // Boss
             boss.draw(g2d, getWidth()/2, getHeight()/3);
 
+            // 还原平移用于UI
+            g2d.translate(-shakeX, -shakeY);
+
             // 血条
-            int barW = 500;
-            int barX = getWidth()/2 - barW/2;
-            int barY = 40;
+            int barW = 500; int barX = getWidth()/2 - barW/2; int barY = 40;
             double hpPct = (double)boss.getHealth()/boss.getMaxHealth();
-            g2d.setColor(new Color(70,0,90));
-            g2d.fillRoundRect(barX, barY, barW, 24, 12,12);
-            g2d.setColor(new Color(180,40,220));
-            g2d.fillRoundRect(barX, barY, (int)(barW*hpPct), 24, 12,12);
-            g2d.setColor(Color.WHITE);
-            g2d.drawRoundRect(barX, barY, barW, 24, 12,12);
+            g2d.setColor(new Color(70,0,90)); g2d.fillRoundRect(barX, barY, barW, 24, 12,12);
+            g2d.setColor(new Color(180,40,220)); g2d.fillRoundRect(barX, barY, (int)(barW*hpPct), 24, 12,12);
+            g2d.setColor(Color.WHITE); g2d.drawRoundRect(barX, barY, barW, 24, 12,12);
             g2d.setFont(new Font("Monospaced", Font.PLAIN, 16));
             g2d.drawString("HP: "+boss.getHealth()+" / "+boss.getMaxHealth(), barX+10, barY+17);
 
-            // 分数
+            // 分数 & 连击
             g2d.drawString("SCORE: "+score, 20, getHeight()-30);
+            if (comboCount > 1) {
+                String comboStr = comboCount + " COMBO x" + String.format("%.2f", comboMultiplier);
+                g2d.setFont(new Font("Monospaced", Font.BOLD, 22));
+                float alpha = (float)Math.min(1.0, 0.3 + comboCount/30.0);
+                g2d.setColor(new Color(255, 220, 120, (int)(alpha*255)));
+                g2d.drawString(comboStr, 20, getHeight()-60);
+            }
 
-            // 提示
-            g2d.drawString("按 A S D F G 触发乐器攻击 (也可点击按钮)", 20, getHeight()-50);
+            // ��示
+            g2d.setFont(new Font("Monospaced", Font.PLAIN, 14));
+            g2d.drawString("按 A S D F G (可长按) 触发乐器攻击 | 连击窗口: " + COMBO_WINDOW_MS + "ms", 20, getHeight()-80);
 
             // 特效
             synchronized (activeEffects) {
-                for (AttackEffect ef : activeEffects) {
-                    ef.draw(g2d);
-                }
+                for (AttackEffect ef : activeEffects) { ef.draw(g2d); }
             }
         }
     }
